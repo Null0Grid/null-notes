@@ -1385,11 +1385,14 @@ mod tests {
         m.s.lock().unwrap().search_only = false;
         // two 503s, then fine: retried with backoff
         m.s.lock().unwrap().fail_next = 2;
-        fs::write(root.join("CON.md"), "reserved name").unwrap();
+        // Windows itself can't create "CON.md"; elsewhere Drive refuses it and it's reported
+        let reserved = fs::write(root.join("CON.md"), "reserved name").is_ok();
         let r = run_once(&root, "N", &drive(&m, "tok"), &mut st).unwrap();
         assert_eq!(r.uploaded.len(), 8);
-        assert_eq!(r.problems.len(), 1, "{:?}", r.problems);
-        assert!(r.problems[0].contains("CON.md"));
+        if reserved {
+            assert_eq!(r.problems.len(), 1, "{:?}", r.problems);
+            assert!(r.problems[0].contains("CON.md"));
+        }
         // keeps failing: the run stops with a network error
         m.s.lock().unwrap().fail_next = 99;
         assert!(matches!(run_once(&root, "N", &drive(&m, "tok"), &mut st).unwrap_err(), DErr::Transient(_)));

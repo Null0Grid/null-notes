@@ -4,3 +4,4 @@ src-tauri/gen/
 packaging/msix/stage/
 packaging/msix/*.msix
 packaging/msix/priconfig.xml
+packaging/msix/stage/
