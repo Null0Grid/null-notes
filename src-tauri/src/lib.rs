@@ -3,6 +3,7 @@
 
 mod agent;
 mod index;
+mod links;
 mod lock;
 mod noteid;
 mod vault;
@@ -11,7 +12,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_dialog::DialogExt;
 use vault::{Entry, ImportReport, Vault, R};
 
@@ -40,6 +42,8 @@ struct Settings {
 #[derive(Default)]
 struct AppState {
     vault: Mutex<Option<Vault>>,
+    /// A nullnotes:// link waiting for the frontend to open it.
+    pending_open: Mutex<Option<links::OpenRequest>>,
 }
 
 fn settings_path(app: &AppHandle) -> Option<PathBuf> {
@@ -326,8 +330,45 @@ fn read_all_locked(st: State<AppState>) -> R<BTreeMap<String, String>> {
     with(&st, |v| v.read_all_locked())
 }
 
+/* ---------------- nullnotes:// links ---------------- */
+
+fn focus_main(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+}
+
+/// Resolve links off the main thread (a cold start may still be indexing),
+/// then hand the result to the frontend.
+fn handle_links(app: &AppHandle, urls: Vec<String>) {
+    let Some(link) = urls.into_iter().find(|u| u.to_ascii_lowercase().starts_with("nullnotes:")) else { return };
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let st = app.state::<AppState>();
+        let open_root = st.vault.lock().unwrap().as_ref().map(|v| v.root.clone());
+        let search = app.state::<Arc<agent::Search>>();
+        let recent: Vec<PathBuf> = load_settings(&app).recent.into_iter().map(PathBuf::from).collect();
+        let req = links::resolve(&link, open_root, |id| search.find(id), &recent);
+        *st.pending_open.lock().unwrap() = Some(req);
+        let _ = app.emit("open-note", ());
+        focus_main(&app);
+    });
+}
+
+/// The frontend calls this on start-up and on every "open-note" event.
+#[tauri::command]
+fn take_pending_open(st: State<AppState>) -> Option<links::OpenRequest> {
+    st.pending_open.lock().unwrap().take()
+}
+
 pub fn build(b: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
-    b.plugin(tauri_plugin_dialog::init())
+    // single-instance must be the first plugin: a second launch (e.g. Windows
+    // starting us for a link) forwards its arguments here and exits.
+    b.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| focus_main(app)))
+        .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .setup(|app| {
             let h = app.handle().clone();
@@ -343,6 +384,18 @@ pub fn build(b: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
                     *app.state::<AppState>().vault.lock().unwrap() = Some(v);
                 }
             }
+            // Installers (NSIS/MSI) and the MSIX manifest register nullnotes://.
+            // Dev builds and Linux register the running binary instead.
+            #[cfg(any(target_os = "linux", all(debug_assertions, windows)))]
+            if let Err(e) = app.deep_link().register_all() {
+                eprintln!("couldn't register nullnotes:// for this build: {e}");
+            }
+            let lh = h.clone();
+            app.deep_link().on_open_url(move |ev| handle_links(&lh, ev.urls().iter().map(|u| u.to_string()).collect()));
+            // Cold start: Windows launched us with the link as an argument.
+            if let Ok(Some(urls)) = app.deep_link().get_current() {
+                handle_links(&h, urls.iter().map(|u| u.to_string()).collect());
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -353,6 +406,7 @@ pub fn build(b: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
             lock_status, lock_setup, lock_unlock, lock_change, lock_lock,
             encrypt_path, decrypt_path, read_locked, write_locked, create_locked, read_all_locked,
             agent_info, agent_set_origin, agent_new_token,
+            take_pending_open,
         ])
 }
 

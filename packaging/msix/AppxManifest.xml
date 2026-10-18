@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Null Notes MSIX manifest (Microsoft Store / sideload).
+  build-msix.ps1 fills in {{VERSION}} (from tauri.conf.json, as x.y.z.0) and {{PUBLISHER}}.
+  Identity Name and Publisher must match the app reserved in Partner Center
+  (Product management > Product identity).
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap uap3 rescap">
+
+  <Identity
+    Name="NULLGRID.NullNotes"
+    Publisher="{{PUBLISHER}}"
+    Version="{{VERSION}}"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>Null Notes</DisplayName>
+    <PublisherDisplayName>NULLGRID</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <Description>A local markdown vault for notes, pages and images.</Description>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <Application Id="NullNotes" Executable="null-notes.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="Null Notes"
+        Description="A local markdown vault for notes, pages and images."
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" ShortName="Null Notes" />
+      </uap:VisualElements>
+
+      <Extensions>
+        <!--
+          nullnotes://open?id=<uuid> (search contract v1). Windows starts
+          null-notes.exe with the link as its ONLY argument, which is what the
+          deep-link plugin expects; a running copy receives it via single-instance.
+        -->
+        <uap3:Extension Category="windows.protocol">
+          <uap3:Protocol Name="nullnotes" Parameters="&quot;%1&quot;">
+            <uap:DisplayName>Null Notes link</uap:DisplayName>
+            <uap:Logo>Assets\Square44x44Logo.png</uap:Logo>
+          </uap3:Protocol>
+        </uap3:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>

@@ -218,6 +218,13 @@ impl Search {
         }
     }
 
+    /// (vault root, path) for an indexed note id in the open vault.
+    pub fn find(&self, id: &str) -> Option<(PathBuf, String)> {
+        let g = self.index.lock().unwrap();
+        let ix = g.as_ref()?;
+        ix.find_path(id).map(|p| (ix.root().to_path_buf(), p))
+    }
+
     pub fn renamed(&self, from: &str, to: &str) {
         if let Some(ix) = self.index.lock().unwrap().as_ref() {
             let _ = ix.rename(from, to);

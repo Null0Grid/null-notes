@@ -10,6 +10,11 @@ export async function api(cmd, args = {}) {
   return mock(cmd, args);
 }
 
+/** App events from the Rust side (no-op in the browser demo). */
+export function onEvent(name, handler) {
+  if (native) T.event.listen(name, handler);
+}
+
 /**
  * Files dragged in from Explorer. handler({type, paths, x, y}) where type is
  * enter | over | drop | leave and x/y are CSS pixels in the window.
@@ -207,6 +212,7 @@ async function mock(cmd, a) {
       return importStaged(ids, clean(a.dest));
     }
     case "reveal_path": fail("The browser demo has no file manager to open.");
+    case "take_pending_open": return null;
     case "agent_info": return { ...M.agent, address: "http://127.0.0.1:47821", status: "Not running in the browser demo", indexed: false };
     case "agent_set_origin": M.agent.origin = a.origin; return mock("agent_info", {});
     case "agent_new_token": M.agent.token = [...crypto.getRandomValues(new Uint8Array(32))].map((b) => b.toString(16).padStart(2, "0")).join(""); return mock("agent_info", {});

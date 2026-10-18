@@ -1,6 +1,6 @@
-# Null Notes (v0.4.0)
+# Null Notes (v0.5.0)
 
-0.4.0 adds Phase 1 of cross-product search (see the Null Grid search contract v1). The rest of this file describes the 0.3.1 recovery.
+0.5.0 adds `nullnotes://` links (Phase 5). 0.4.0 added Phase 1 of cross-product search (see the Null Grid search contract v1). The rest of this file describes the 0.3.1 recovery.
 
 ## Phase 1: search agent
 
@@ -14,7 +14,14 @@
 curl -H "X-Null-Token: <token>" "http://127.0.0.1:47821/search?q=libre%20ai"
 ```
 
-Not done yet: registering the `nullnotes://open?id=` link with Windows, so a result opens the note.
+## Phase 5: `nullnotes://open?id=<uuid>` links
+
+- **What a link does.** It opens the note in the desktop app. Lookup order: the open vault's index, a scan of the open vault (`ids.json`, then `.md` frontmatter), then your other recent vaults. If the note is in another vault, the app saves and locks the current one, switches, and opens it. Links can come from any web page, so only `open` with a valid uuid is accepted. A link can't create, change or delete anything. A bad or unknown link shows a toast.
+- **Already running.** `tauri-plugin-single-instance` (registered first) forwards the link to the running copy and the new process exits, so there is never a second app fighting over port 47821. A cold start reads the link from the command line (`deep-link` `get_current`).
+- **NSIS / MSI install.** `plugins.deep-link.desktop.schemes = ["nullnotes"]` makes the Tauri bundler write `Software\Classes\nullnotes` (`"null-notes.exe" "%1"`) on install and remove it on uninstall. Dev builds register themselves at startup.
+- **Microsoft Store (MSIX).** Registry writes don't register protocols for packaged apps; the manifest does. `packaging/msix/AppxManifest.xml` declares `uap3:Protocol Name="nullnotes" Parameters="&quot;%1&quot;"`. The link must be the only argument, because that's what the deep-link plugin accepts. `packaging/msix/build-msix.ps1` builds the release exe and fills in the version (x.y.z.0) from `tauri.conf.json`. It also generates `resources.pri` for the scaled logos and packs `NullNotes_<ver>_x64.msix`; `-Sign -CertPath` signs it for a local install test. Identity `NULLGRID.NullNotes` and the publisher come from your 0.3.1 package; check them against Partner Center → Product identity.
+
+Test a link on Windows: `start nullnotes://open?id=<id>`, or from PowerShell `Start-Process "nullnotes://open?id=<id>"`.
 
 ---
 

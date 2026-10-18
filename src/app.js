@@ -1,5 +1,5 @@
 // Null Notes desktop UI.
-import { api, native, onFileDrop } from "./backend.js";
+import { api, native, onFileDrop, onEvent } from "./backend.js";
 import { render, linkTargets, tagsIn, esc } from "./markdown.js";
 import { createGraph } from "./graph.js";
 import { createCanvas } from "./canvas.js";
@@ -1697,6 +1697,32 @@ function bindGlobal() {
 }
 
 /* ---------------- boot ---------------- */
+/* ---------------- nullnotes://open?id= links ---------------- */
+let linkBusy = Promise.resolve();
+function handleOpenLink() {
+  // Serialise: two links clicked quickly must not switch vaults over each other.
+  linkBusy = linkBusy.then(async () => {
+    const req = await api("take_pending_open").catch(() => null);
+    if (!req) return;
+    if (req.error) { toast(req.error, true); return; }
+    try {
+      if (!S.vault || S.vault.path !== req.vault.path) {
+        // Save and lock the current vault first, exactly like "Open another vault".
+        await flush();
+        await lockVault(true);
+        await enterVault(await api("open_vault", { path: req.vault.path }));
+      } else {
+        await refresh(); // the note may be brand new
+      }
+      if (!S.byPath.has(req.path)) { toast("That note isn't in this vault anymore.", true); return; }
+      closeGraph();
+      showTab("files");
+      await open(req.path);
+    } catch (e) { toast(errText(e), true); }
+  });
+  return linkBusy;
+}
+
 async function boot() {
   bindGlobal();
   bindTree();
@@ -1706,9 +1732,11 @@ async function boot() {
   bindGraph();
   bindFileDrop();
   if (!native) document.title = "Null Notes (browser demo)";
+  onEvent("open-note", handleOpenLink);
   try {
     const v = await api("vault_info");
     if (v) await enterVault(v); else await showWelcome();
+    await handleOpenLink(); // launched by a link
   } catch (e) {
     await showWelcome();
     toast(errText(e), true);

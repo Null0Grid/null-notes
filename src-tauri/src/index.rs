@@ -294,6 +294,15 @@ impl Index {
         Ok(())
     }
 
+    /// Vault-relative path of the note with this id, if indexed.
+    pub fn find_path(&self, id: &str) -> Option<String> {
+        self.db.query_row("SELECT path FROM files WHERE id=? LIMIT 1", [id], |r| r.get(0)).optional().ok().flatten()
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     pub fn search(&self, q: &str, limit: usize) -> rusqlite::Result<Vec<Hit>> {
         let nq = norm(q);
         if nq.is_empty() {
