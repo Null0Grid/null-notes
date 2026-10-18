@@ -151,6 +151,7 @@ async function enterVault(v) {
   document.title = v.name + " · Null Notes";
   await loadSettings();
   applyAddons();
+  refreshBackup();
   setMode(S.mode, true);
   await refresh();
   const first =
@@ -1097,6 +1098,7 @@ function armAutoLock() {
 async function openSettings() {
   const st = JSON.parse(JSON.stringify(S.settings));
   const ag = await api("agent_info").catch(() => null);
+  const bk = await api("backup_status").catch(() => null);
   const tog = (id, label, on) => `<label class="gtog"><span>${label}</span><input type="checkbox" id="${id}" ${on ? "checked" : ""}><i></i></label>`;
   const formats = ["YYYY-MM-DD", "YYYY-MM-DD dddd", "DD-MM-YYYY", "MM-DD-YYYY", "YYYY/MM/YYYY-MM-DD"];
   const result = await modal(
@@ -1137,6 +1139,19 @@ async function openSettings() {
        <div class="setnote">Only this address can query your notes from a browser. Leave it empty to block all browser access.</div>
        <div class="setnote ${/^Listening/.test(ag.status) ? "" : "warn"}" id="sAgentStatus">${esc(ag.status)}</div>
      </div>` : ""}
+     ${bk ? `<div class="setsec" id="backupSec">
+       <h3>Back up to Null Drive <span class="badge k-md">ADD-ON</span></h3>
+       ${tog("sBackup", "Back up this vault to Null Drive", bk.enabled)}
+       <div class="sub" id="backupSub" ${bk.enabled ? "" : "hidden"}>
+         <div class="setnote">One way: changes in this vault are copied to your Drive. Nothing on Drive is ever copied back here. Files you delete go to Drive's Recently deleted for 30 days.</div>
+         <div class="setrow"><span>Null Drive address</span><input type="text" id="sBkServer" value="${esc(bk.server)}" placeholder="https://drive.example.com" spellcheck="false"></div>
+         <div class="setrow"><span>API token</span><input type="password" id="sBkToken" value="" autocomplete="off" placeholder="${bk.has_token ? "Saved. Paste a new one to replace it" : "Paste a token from Drive"}" spellcheck="false"></div>
+         <div class="setnote">In Drive: Settings → Devices → Add device → Create an API token instead, scope <b>Everything</b>. The token is kept in Windows Credential Manager.</div>
+         <div class="setrow"><span>Folder on Drive</span><input type="text" id="sBkFolder" value="${esc(bk.folder)}" placeholder="${esc(bk.default_folder)}" spellcheck="false"></div>
+         <div class="row2" style="justify-content:flex-start"><button type="button" class="btn" id="sBkTest">Test connection</button><button type="button" class="btn" id="sBkNow" ${bk.enabled ? "" : "disabled"}>Back up now</button></div>
+         <div class="setnote" id="sBkStatus"></div>
+       </div>
+     </div>` : ""}
      <div class="row2"><button type="button" class="btn" data-cancel>Cancel</button><button type="submit" class="btn">Save</button></div>`,
     (form, done) => {
       form.querySelector("#sDaily").onchange = (e) => (form.querySelector("#dailySub").hidden = !e.target.checked);
@@ -1151,6 +1166,18 @@ async function openSettings() {
           if (!confirm("Make a new pairing token? Null Search stops working until you paste the new one in.")) return;
           try { tok.value = (await api("agent_new_token")).token; toast("New pairing token made"); } catch (e) { toast(errText(e), true); }
         };
+      }
+      if (bk) {
+        const q = (id) => form.querySelector("#" + id);
+        q("sBackup").onchange = (e) => (q("backupSub").hidden = !e.target.checked);
+        drawBackupStatus(q("sBkStatus"), bk);
+        q("sBkTest").onclick = async () => {
+          const b = q("sBkTest"); b.disabled = true; q("sBkStatus").textContent = "Connecting…"; q("sBkStatus").className = "setnote";
+          try { q("sBkStatus").textContent = await api("backup_test", { server: q("sBkServer").value, token: q("sBkToken").value || null }); }
+          catch (e) { q("sBkStatus").textContent = errText(e); q("sBkStatus").className = "setnote warn"; }
+          b.disabled = false;
+        };
+        q("sBkNow").onclick = () => { api("backup_now").catch(() => {}); q("sBkStatus").textContent = "Backing up…"; };
       }
       const cp = form.querySelector("#sChangePass");
       if (cp) cp.onclick = () => { done("changepass"); };
@@ -1168,6 +1195,7 @@ async function openSettings() {
         st.lock.enabled = v("sLock").checked;
         st.lock.autoLockMin = +v("sLockMin").value;
         if (ag) st.__origin = v("sOrigin").value.trim();
+        if (bk) st.__backup = { enabled: v("sBackup").checked, server: v("sBkServer").value.trim(), folder: v("sBkFolder").value.trim(), token: v("sBkToken").value.trim() || null };
         done(st);
       };
     }, true
@@ -1179,6 +1207,15 @@ async function openSettings() {
     delete result.__origin;
     if (ag && origin !== ag.origin) {
       try { await api("agent_set_origin", { origin }); }
+      catch (e) { toast(errText(e), true); return; }
+    }
+  }
+  if ("__backup" in result) {
+    const b = result.__backup;
+    delete result.__backup;
+    const changed = b.token || b.enabled !== bk.enabled || (b.enabled && (b.server !== bk.server || (b.folder || bk.default_folder) !== bk.folder));
+    if (changed) {
+      try { BK = await api("backup_configure", b); drawNet(); }
       catch (e) { toast(errText(e), true); return; }
     }
   }
@@ -1697,6 +1734,51 @@ function bindGlobal() {
 }
 
 /* ---------------- boot ---------------- */
+/* ---------------- back up to Null Drive ---------------- */
+let BK = null, lastBkError = "";
+async function refreshBackup() {
+  BK = await api("backup_status").catch(() => null);
+  drawNet();
+}
+function agoText(iso) {
+  if (!iso) return "";
+  const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  if (s < 60) return "just now";
+  if (s < 3600) return Math.round(s / 60) + " min ago";
+  if (s < 86400) return Math.round(s / 3600) + " h ago";
+  return new Date(iso).toLocaleString();
+}
+function drawNet() {
+  const el = $("netStat");
+  if (!el) return;
+  const on = BK && BK.enabled;
+  let label = "LOCAL · NO NETWORK", title = "Notes are stored on this computer";
+  if (on) {
+    const st = { idle: BK.last_ok ? "BACKED UP " + agoText(BK.last_ok).toUpperCase() : "BACKUP ON", waiting: "BACKUP PENDING", running: "BACKING UP…", error: "BACKUP ERROR" }[BK.state] || "BACKUP ON";
+    label = "LOCAL + DRIVE · " + st;
+    title = `Backed up one way to ${BK.server} › ${BK.folder}` + (BK.state === "error" ? "\n" + BK.message : "");
+  }
+  el.innerHTML = `<span class="dot${on && BK.state === "error" ? " bad" : ""}"></span>${esc(label)}`;
+  el.title = title;
+  el.classList.toggle("warn", !!(on && BK.state === "error"));
+}
+function drawBackupStatus(box, b) {
+  if (!box || !b) return;
+  const parts = [];
+  if (b.state === "running") parts.push("Backing up…");
+  else if (b.message) parts.push(b.message);
+  if (b.last_ok) parts.push(`Last backup ${agoText(b.last_ok)}: ${b.uploaded} sent, ${b.deleted} to Drive's trash${b.moved ? `, ${b.moved} moved` : ""}, ${b.unchanged} unchanged.`);
+  box.innerHTML = esc(parts.join(" ")) + (b.problems && b.problems.length ? `<ul class="bkprob">${b.problems.slice(0, 8).map((p) => `<li>${esc(p)}</li>`).join("")}${b.problems.length > 8 ? `<li>…and ${b.problems.length - 8} more</li>` : ""}</ul>` : "");
+  box.className = "setnote" + (b.state === "error" ? " warn" : "");
+}
+function onBackupStatus(b) {
+  BK = b;
+  drawNet();
+  drawBackupStatus(document.getElementById("sBkStatus"), b);
+  if (b.state === "error" && b.message !== lastBkError) toast("Backup: " + b.message, true);
+  lastBkError = b.state === "error" ? b.message : "";
+}
+
 /* ---------------- nullnotes://open?id= links ---------------- */
 let linkBusy = Promise.resolve();
 function handleOpenLink() {
@@ -1733,6 +1815,7 @@ async function boot() {
   bindFileDrop();
   if (!native) document.title = "Null Notes (browser demo)";
   onEvent("open-note", handleOpenLink);
+  onEvent("backup-status", (e) => onBackupStatus(e.payload));
   try {
     const v = await api("vault_info");
     if (v) await enterVault(v); else await showWelcome();

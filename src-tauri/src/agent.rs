@@ -48,6 +48,8 @@ pub struct Search {
     cfg_path: PathBuf,
     db_dir: PathBuf,
     status: Mutex<String>,
+    /// Called on any vault change (incl. .nullnotes/), e.g. to kick the backup.
+    on_change: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
 
 fn new_token() -> String {
@@ -129,6 +131,7 @@ impl Search {
             cfg_path,
             db_dir: data_dir.join("index"),
             status: Mutex::new("Starting…".into()),
+            on_change: Mutex::new(None),
         });
         if cfg.token.len() < 32 {
             // First run: mint the pairing token.
@@ -200,6 +203,11 @@ impl Search {
                 if relevant {
                     me.resync();
                 }
+                if events.iter().any(|e| !e.path.to_string_lossy().ends_with(".nntmp")) {
+                    if let Some(f) = me.on_change.lock().unwrap().as_ref() {
+                        f();
+                    }
+                }
             }
         });
         match deb {
@@ -223,6 +231,10 @@ impl Search {
         let g = self.index.lock().unwrap();
         let ix = g.as_ref()?;
         ix.find_path(id).map(|p| (ix.root().to_path_buf(), p))
+    }
+
+    pub fn set_on_change(&self, f: Box<dyn Fn() + Send + Sync>) {
+        *self.on_change.lock().unwrap() = Some(f);
     }
 
     pub fn renamed(&self, from: &str, to: &str) {

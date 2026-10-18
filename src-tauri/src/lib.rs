@@ -2,6 +2,7 @@
 //! frontend (src/backend.js) invokes.
 
 mod agent;
+mod backup;
 mod index;
 mod links;
 mod lock;
@@ -90,8 +91,10 @@ fn enter(app: &AppHandle, st: &State<AppState>, path: PathBuf) -> R<VaultInfo> {
     s.last = Some(i.path.clone());
     save_settings(app, &s);
     let root = v.root.clone();
+    let name = v.name();
     *st.vault.lock().unwrap() = Some(v);
-    app.state::<Arc<agent::Search>>().set_vault(Some(root));
+    app.state::<Arc<agent::Search>>().set_vault(Some(root.clone()));
+    app.state::<Arc<backup::Backup>>().set_vault(Some((root, name)));
     Ok(i)
 }
 
@@ -138,6 +141,7 @@ async fn pick_vault(app: AppHandle, st: State<'_, AppState>) -> R<Option<VaultIn
 fn close_vault(app: AppHandle, st: State<AppState>) {
     *st.vault.lock().unwrap() = None;
     app.state::<Arc<agent::Search>>().set_vault(None);
+    app.state::<Arc<backup::Backup>>().set_vault(None);
     let mut s = load_settings(&app);
     s.last = None;
     save_settings(&app, &s);
@@ -186,12 +190,36 @@ fn create_folder(st: State<AppState>, path: String) -> R<()> {
 }
 
 #[tauri::command]
-fn rename_path(st: State<AppState>, search: State<Arc<agent::Search>>, from: String, to: String) -> R<()> {
+fn rename_path(st: State<AppState>, search: State<Arc<agent::Search>>, bk: State<Arc<backup::Backup>>, from: String, to: String) -> R<()> {
     with(&st, |v| v.rename_path(&from, &to))?;
     if let (Ok(f), Ok(t)) = (vault::clean(&from), vault::clean(&to)) {
         search.renamed(&f, &t);
+        bk.renamed(&f, &t);
     }
     Ok(())
+}
+
+/* ---------------- back up to Null Drive (Settings) ---------------- */
+
+#[tauri::command]
+fn backup_status(bk: State<Arc<backup::Backup>>) -> backup::Status {
+    bk.status()
+}
+
+/// `token`: None keeps the saved one, "" removes it.
+#[tauri::command]
+fn backup_configure(bk: State<Arc<backup::Backup>>, enabled: bool, server: String, folder: String, token: Option<String>) -> R<backup::Status> {
+    bk.configure(enabled, &server, &folder, token.as_deref())
+}
+
+#[tauri::command]
+async fn backup_test(bk: State<'_, Arc<backup::Backup>>, server: String, token: Option<String>) -> R<String> {
+    bk.test(&server, token.as_deref())
+}
+
+#[tauri::command]
+fn backup_now(bk: State<Arc<backup::Backup>>) {
+    bk.back_up_now()
 }
 
 #[tauri::command]
@@ -377,10 +405,22 @@ pub fn build(b: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
             let search = agent::Search::new(&cfg_dir, &data_dir);
             search.serve();
             app.manage(search.clone());
+            let eh = h.clone();
+            let bk = backup::Backup::new(&cfg_dir, &data_dir, Box::new(move |s: &backup::Status| {
+                let _ = eh.emit("backup-status", s.clone());
+            }));
+            let kick = Arc::downgrade(&bk);
+            search.set_on_change(Box::new(move || {
+                if let Some(b) = kick.upgrade() {
+                    b.kick();
+                }
+            }));
+            app.manage(bk.clone());
             // Reopen the last vault, like the shipped app.
             if let Some(last) = load_settings(&h).last {
                 if let Ok(v) = Vault::open(PathBuf::from(last)) {
                     search.set_vault(Some(v.root.clone()));
+                    bk.set_vault(Some((v.root.clone(), v.name())));
                     *app.state::<AppState>().vault.lock().unwrap() = Some(v);
                 }
             }
@@ -407,6 +447,7 @@ pub fn build(b: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
             encrypt_path, decrypt_path, read_locked, write_locked, create_locked, read_all_locked,
             agent_info, agent_set_origin, agent_new_token,
             take_pending_open,
+            backup_status, backup_configure, backup_test, backup_now,
         ])
 }
 

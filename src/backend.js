@@ -45,7 +45,7 @@ export function onFileDrop(handler) {
 
 /* ---------------- browser demo vault ---------------- */
 
-const M = { open: false, dirs: new Set(), files: new Map(), staged: new Map(), meta: new Map(), agent: { token: "demo-token-not-real", origin: "" } };
+const M = { open: false, dirs: new Set(), files: new Map(), staged: new Map(), meta: new Map(), agent: { token: "demo-token-not-real", origin: "" }, backup: { enabled: false, server: "", folder: "", has_token: false } };
 const KINDS = { md: "md", markdown: "md", txt: "txt", html: "html", htm: "html", canvas: "canvas", png: "img", jpg: "img", jpeg: "img" };
 const extOf = (p) => (p.match(/\.([^./]+)$/) || [, ""])[1].toLowerCase();
 const kindOf = (p) => (extOf(p) === "lock" ? (["md", "txt", "html", "canvas"].includes(KINDS[extOf(p.slice(0, -5))]) ? "locked" : null) : KINDS[extOf(p)] || null);
@@ -213,6 +213,10 @@ async function mock(cmd, a) {
     }
     case "reveal_path": fail("The browser demo has no file manager to open.");
     case "take_pending_open": return null;
+    case "backup_status": return { ...M.backup, default_folder: "Null Notes/Null Notes", folder: M.backup.folder || "Null Notes/Null Notes", state: M.backup.enabled ? "idle" : "off", message: "", problems: [] };
+    case "backup_configure": if (a.enabled && !a.server) fail("Enter the Null Drive address, like https://drive.example.com"); Object.assign(M.backup, { enabled: a.enabled, server: a.server, folder: a.folder, has_token: M.backup.has_token || !!a.token }); return mock("backup_status", {});
+    case "backup_test": fail("The browser demo can't reach Null Drive.");
+    case "backup_now": return null;
     case "agent_info": return { ...M.agent, address: "http://127.0.0.1:47821", status: "Not running in the browser demo", indexed: false };
     case "agent_set_origin": M.agent.origin = a.origin; return mock("agent_info", {});
     case "agent_new_token": M.agent.token = [...crypto.getRandomValues(new Uint8Array(32))].map((b) => b.toString(16).padStart(2, "0")).join(""); return mock("agent_info", {});

@@ -407,5 +407,13 @@ textarea::selection{background:rgba(0,229,255,.25)}
 .wlogo .mk-sq{stroke-width:3}
 
 /* Null Search pairing (Settings) */
-.tokenfield { font-family: var(--mono, "IBM Plex Mono", monospace); font-size: 11px; letter-spacing: .02em; width: 100%; min-width: 0; }
+.tokenfield { font-family: var(--f-mono); font-size: 11px; letter-spacing: .02em; width: 100%; min-width: 0; }
 #agentSec .setrow input[type="text"] { flex: 1; }
+
+/* Back up to Null Drive */
+#backupSec .setrow input[type="text"], #backupSec .setrow input[type="password"] { flex: 1; }
+.bkprob { margin: 6px 0 0 16px; padding: 0; }
+.bkprob li { margin: 2px 0; }
+.status .warn { color: var(--amber); }
+.status .dot.bad { background: var(--amber); box-shadow: 0 0 6px var(--amber); }
+#backupSec .setrow input[type=password] { margin-top: 0; padding: 7px 10px; font-size: 12px; }

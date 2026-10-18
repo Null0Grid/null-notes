@@ -1,6 +1,6 @@
 [package]
 name = "null-notes"
-version = "0.5.0"
+version = "0.6.0"
 description = "Null Notes - a local markdown vault"
 authors = ["Luke"]
 edition = "2021"
@@ -28,11 +28,24 @@ notify = "6"
 notify-debouncer-mini = "0.4"
 tiny_http = "0.12"
 uuid = { version = "1", features = ["v4"] }
-time = { version = "0.3", features = ["formatting"] }
+time = { version = "0.3", features = ["formatting", "parsing"] }
 filetime = "0.2"
 # Phase 5: nullnotes:// links
 tauri-plugin-deep-link = "2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+# Phase 6: back up to Null Drive
+ureq = { version = "2", default-features = false, features = ["native-tls", "json"] }
+native-tls = "0.2"
+sha2 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["linux-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
 
 [profile.release]
 codegen-units = 1
