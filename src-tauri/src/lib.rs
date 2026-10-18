@@ -7,6 +7,8 @@ mod index;
 mod links;
 mod lock;
 mod noteid;
+mod sync;
+mod syncplan;
 mod vault;
 
 use serde::{Deserialize, Serialize};
@@ -169,9 +171,10 @@ fn read_image(st: State<AppState>, path: String) -> R<String> {
     with(&st, |v| v.read_image(&path))
 }
 
+/// Returns the conflict copy's path when the file changed on disk since `base`.
 #[tauri::command]
-fn write_text(st: State<AppState>, path: String, content: String) -> R<()> {
-    with(&st, |v| v.write_text(&path, &content))
+fn write_text(st: State<AppState>, path: String, content: String, base: Option<String>) -> R<Option<String>> {
+    with(&st, |v| v.write_text_guarded(&path, &content, base.as_deref()))
 }
 
 #[tauri::command]
@@ -410,10 +413,12 @@ pub fn build(b: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
                 let _ = eh.emit("backup-status", s.clone());
             }));
             let kick = Arc::downgrade(&bk);
+            let vh = h.clone();
             search.set_on_change(Box::new(move || {
                 if let Some(b) = kick.upgrade() {
                     b.kick();
                 }
+                let _ = vh.emit("vault-changed", ());
             }));
             app.manage(bk.clone());
             // Reopen the last vault, like the shipped app.

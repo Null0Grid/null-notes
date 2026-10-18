@@ -21,6 +21,12 @@ pub const TEXT_KINDS: [&str; 4] = ["md", "txt", "html", "canvas"];
 
 pub type R<T> = Result<T, String>;
 
+/// Today's date for conflict names, in local time where the OS tells us.
+pub fn conflict_date() -> String {
+    let now = time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+    format!("{:04}-{:02}-{:02}", now.year(), now.month() as u8, now.day())
+}
+
 #[derive(Serialize, Clone)]
 pub struct Entry {
     pub path: String,
@@ -236,6 +242,52 @@ impl Vault {
     }
 
     /* ---------- writing ---------- */
+
+    /// "Plan.md" -> "Plan (conflict 2026-10-18).md" (then "… 2", "… 3"), in the
+    /// same folder. Locked notes keep both extensions: "Plan (conflict …).md.lock".
+    pub fn conflict_path(&self, rel: &str) -> String {
+        let (dir, name) = match rel.rfind('/') {
+            Some(i) => (&rel[..i], &rel[i + 1..]),
+            None => ("", rel),
+        };
+        let lower = name.to_ascii_lowercase();
+        let ext_len = if lower.ends_with(".lock") {
+            let inner = &name[..name.len() - 5];
+            inner.rfind('.').map(|i| name.len() - i).unwrap_or(5)
+        } else {
+            name.rfind('.').filter(|&i| i > 0).map(|i| name.len() - i).unwrap_or(0)
+        };
+        let (stem, ext) = name.split_at(name.len() - ext_len);
+        let date = conflict_date();
+        let join = |n: String| if dir.is_empty() { n } else { format!("{dir}/{n}") };
+        let first = join(format!("{stem} (conflict {date}){ext}"));
+        if !self.exists(&first) {
+            return first;
+        }
+        (2..).map(|n| join(format!("{stem} (conflict {date} {n}){ext}"))).find(|p| !self.exists(p)).unwrap()
+    }
+
+    /// Save from the editor. `base` is the text the edit started from. If the
+    /// file on disk changed since (sync, git, another editor), the disk version
+    /// stays and the edit is saved next to it as a conflict copy, whose path is
+    /// returned. Nothing is ever silently overwritten.
+    pub fn write_text_guarded(&self, rel: &str, content: &str, base: Option<&str>) -> R<Option<String>> {
+        let p = clean(rel)?;
+        if let Some(base) = base {
+            if let Ok(b) = fs::read(self.abs(&p)) {
+                let disk = String::from_utf8_lossy(&b);
+                let disk = if noteid::is_md(&p) { noteid::strip_id(&disk) } else { disk.into_owned() };
+                if disk != base && disk != content {
+                    let copy = self.conflict_path(&p);
+                    // a copy is a different note: new id (md frontmatter / ids.json)
+                    let body = if noteid::is_md(&p) { noteid::with_id(&noteid::strip_id(content), &noteid::new_id()) } else { content.to_string() };
+                    self.write_text(&copy, &body)?;
+                    return Ok(Some(copy));
+                }
+            }
+        }
+        self.write_text(&p, content).map(|_| None)
+    }
 
     pub fn write_text(&self, rel: &str, content: &str) -> R<()> {
         let p = clean(rel)?;
@@ -633,6 +685,32 @@ mod tests {
         assert!(clean(".nullnotes/lock.json").is_err());
         assert!(clean("a/b:c.md").is_err());
         assert_eq!(clean("\\a\\b.md/").unwrap(), "a/b.md");
+    }
+
+    #[test]
+    fn guarded_save_keeps_both() {
+        let (v, d) = tmp_vault();
+        v.write_text("Plan.md", "v1").unwrap();
+        // editor opened "v1"; meanwhile sync wrote "remote"
+        let id = noteid::get_id(&fs::read_to_string(d.join("Plan.md")).unwrap()).unwrap();
+        fs::write(d.join("Plan.md"), noteid::with_id("remote", &id)).unwrap();
+        let copy = v.write_text_guarded("Plan.md", "mine", Some("v1")).unwrap().unwrap();
+        assert!(copy.starts_with("Plan (conflict ") && copy.ends_with(").md"), "{copy}");
+        assert_eq!(v.read_text("Plan.md").unwrap(), "remote");
+        assert_eq!(v.read_text(&copy).unwrap(), "mine");
+        let copy_id = noteid::get_id(&fs::read_to_string(d.join(&copy)).unwrap()).unwrap();
+        assert_ne!(copy_id, id, "the copy is a separate note");
+        // normal save: base matches disk
+        assert_eq!(v.write_text_guarded("Plan.md", "remote + mine", Some("remote")).unwrap(), None);
+        assert_eq!(v.read_text("Plan.md").unwrap(), "remote + mine");
+        // same content already on disk is not a conflict
+        assert_eq!(v.write_text_guarded("Plan.md", "remote + mine", Some("stale")).unwrap(), None);
+        // names
+        assert_eq!(v.conflict_path("a/Note.md.lock"), format!("a/Note (conflict {}).md.lock", conflict_date()));
+        assert_eq!(v.conflict_path("todo.txt"), format!("todo (conflict {}).txt", conflict_date()));
+        fs::write(d.join(format!("todo (conflict {}).txt", conflict_date())), "x").unwrap();
+        assert_eq!(v.conflict_path("todo.txt"), format!("todo (conflict {} 2).txt", conflict_date()));
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]

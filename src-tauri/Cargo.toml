@@ -28,7 +28,7 @@ notify = "6"
 notify-debouncer-mini = "0.4"
 tiny_http = "0.12"
 uuid = { version = "1", features = ["v4"] }
-time = { version = "0.3", features = ["formatting", "parsing"] }
+time = { version = "0.3", features = ["formatting", "parsing", "local-offset"] }
 filetime = "0.2"
 # Phase 5: nullnotes:// links
 tauri-plugin-deep-link = "2"

@@ -176,11 +176,15 @@ pub(crate) fn parse_ms(s: &str) -> Option<i64> {
     Some((t.unix_timestamp_nanos() / 1_000_000) as i64)
 }
 
-fn now_rfc3339() -> String {
+pub(crate) fn now_rfc3339() -> String {
     time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).unwrap_or_default()
 }
 
-fn sha256_file(p: &Path) -> std::io::Result<String> {
+pub(crate) fn sha256_hex(b: &[u8]) -> String {
+    Sha256::digest(b).iter().map(|x| format!("{x:02x}")).collect()
+}
+
+pub(crate) fn sha256_file(p: &Path) -> std::io::Result<String> {
     let mut f = fs::File::open(p)?;
     let mut h = Sha256::new();
     let mut buf = vec![0u8; 64 * 1024];
@@ -256,6 +260,8 @@ pub enum DErr {
     File(String),
     /// 5xx or network: worth retrying
     Transient(String),
+    /// the file changed on Drive since we looked (If-Match didn't match): retry next run
+    Precondition(String),
     /// anything else
     Other(String),
 }
@@ -268,6 +274,7 @@ impl DErr {
             DErr::E2ee => "This Drive account uses end-to-end encryption, and Null Notes can't back up into it yet. Use an account without encryption.".into(),
             DErr::File(m) | DErr::Other(m) => m.clone(),
             DErr::Transient(m) => format!("Couldn't reach Null Drive: {m}"),
+            DErr::Precondition(m) => format!("{m}: changed on Drive meanwhile, will retry"),
         }
     }
 }

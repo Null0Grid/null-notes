@@ -8,6 +8,7 @@ const $ = (id) => document.getElementById(id);
 
 /* ---------------- state ---------------- */
 const S = {
+  base: {},
   vault: null,
   entries: [],
   byPath: new Map(),
@@ -140,6 +141,7 @@ async function enterVault(v) {
   S.current = null;
   S.images.clear();
   S.texts = {};
+  S.base = {};
   if (graph) graph.reset();
   closeCanvas();
   S.tagFilter = null;
@@ -180,6 +182,7 @@ async function refresh() {
   if (lock.unlocked) {
     try { Object.assign(texts, await api("read_all_locked")); } catch {}
   }
+  for (const p in texts) if (!(S.dirty && p === S.current)) S.base[p] = texts[p];
   if (S.current && S.dirty && S.current in S.texts) texts[S.current] = S.texts[S.current];
   for (const p in S.texts) if (!(p in texts) && S.byPath.has(p) && !isImg(p) && (!isLocked(p) || lock.unlocked)) texts[p] = S.texts[p]; // big files read on demand
   S.texts = texts;
@@ -272,8 +275,20 @@ function setSaved(state, text) {
   s.textContent = text;
   s.className = "saved" + (state === "busy" ? " busy" : state === "err" ? " err" : "");
 }
+// S.base[p]: the text on disk that the current edit of p started from. The
+// backend refuses to overwrite a file that changed since (sync, git, another
+// editor) and saves the edit as a "(conflict YYYY-MM-DD)" copy instead.
 async function writeFile(p, content) {
-  return isLocked(p) ? api("write_locked", { path: p, content }) : api("write_text", { path: p, content });
+  if (isLocked(p)) return api("write_locked", { path: p, content });
+  const conflict = await api("write_text", { path: p, content, base: p in S.base ? S.base[p] : null });
+  if (conflict) {
+    toast(`${fileName(p)} was changed somewhere else while you edited it. Both are kept: your edit is in "${fileName(conflict)}".`, true);
+    S.dirty = false;
+    await refresh();
+    return conflict;
+  }
+  S.base[p] = content;
+  return null;
 }
 async function save() {
   clearTimeout(S.saveTimer);
@@ -507,7 +522,7 @@ async function open(p, select) {
     if (isLocked(p)) {
       if (S.lock.unlocked) { try { S.texts[p] = await api("read_locked", { path: p }); } catch (e) { toast(errText(e), true); } }
     } else {
-      try { S.texts[p] = await api("read_text", { path: p }); }
+      try { S.texts[p] = await api("read_text", { path: p }); S.base[p] = S.texts[p]; }
       catch (e) { toast(errText(e), true); S.texts[p] = ""; }
     }
   }
@@ -1815,6 +1830,9 @@ async function boot() {
   bindFileDrop();
   if (!native) document.title = "Null Notes (browser demo)";
   onEvent("open-note", handleOpenLink);
+  // Files changed on disk outside the editor (sync, Explorer, git): reload, at most once a second.
+  let vcTimer = null;
+  onEvent("vault-changed", () => { if (!vcTimer) vcTimer = setTimeout(() => { vcTimer = null; if (S.vault) refresh(); }, 1000); });
   onEvent("backup-status", (e) => onBackupStatus(e.payload));
   try {
     const v = await api("vault_info");
