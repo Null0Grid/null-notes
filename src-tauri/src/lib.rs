@@ -211,8 +211,8 @@ fn backup_status(bk: State<Arc<backup::Backup>>) -> backup::Status {
 
 /// `token`: None keeps the saved one, "" removes it.
 #[tauri::command]
-fn backup_configure(bk: State<Arc<backup::Backup>>, enabled: bool, server: String, folder: String, token: Option<String>) -> R<backup::Status> {
-    bk.configure(enabled, &server, &folder, token.as_deref())
+fn backup_configure(bk: State<Arc<backup::Backup>>, enabled: bool, server: String, folder: String, token: Option<String>, mode: Option<String>) -> R<backup::Status> {
+    bk.configure(enabled, &server, &folder, token.as_deref(), mode.as_deref().unwrap_or("backup"))
 }
 
 #[tauri::command]

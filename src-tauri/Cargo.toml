@@ -1,6 +1,6 @@
 [package]
 name = "null-notes"
-version = "0.6.0"
+version = "0.7.0"
 description = "Null Notes - a local markdown vault"
 authors = ["Luke"]
 edition = "2021"

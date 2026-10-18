@@ -1,6 +1,6 @@
-# Null Notes (v0.6.0)
+# Null Notes (v0.7.0)
 
-0.6.0 adds an opt-in backup to Null Drive (Phase 6). 0.5.0 added `nullnotes://` links (Phase 5). 0.4.0 added Phase 1 of cross-product search (see the Null Grid search contract v1). The rest of this file describes the 0.3.1 recovery.
+0.7.0 adds two-way sync with Null Drive (Phase 7). 0.6.0 added an opt-in backup to Null Drive (Phase 6). 0.5.0 added `nullnotes://` links (Phase 5). 0.4.0 added Phase 1 of cross-product search (see the Null Grid search contract v1). The rest of this file describes the 0.3.1 recovery.
 
 ## Phase 1: search agent
 
@@ -43,6 +43,25 @@ Settings → **Back up to Null Drive**, off by default and set per vault. You en
 - **Token.** Stored in Windows Credential Manager (`dev.nullgrid.notes` / `drive-backup:<server>`), never in `backup.json`. On Linux it's a `0600` file. `http://` is accepted only for this computer or a private network; anything else needs `https://`.
 - **Status.** The status bar says `LOCAL + DRIVE · BACKED UP 3 MIN AGO` / `BACKUP ERROR` instead of `NO NETWORK` while backup is on. Settings shows the last run's counts and any problems.
 - **Try it without Drive.** `python3 tools/mock_drive.py 8765 mytoken`, then use `http://127.0.0.1:8765`. `/_state` shows what arrived.
+
+## Phase 7: two-way sync with Null Drive
+
+Settings → **Null Drive** → Mode → *Two-way sync*. It uses the same address, token and folder as backup. It follows Drive's published contract, `null-grid/notes-sync-drive-api.md` (server 0.8.2+).
+
+- **Matched by note id, not path.** The key is the Markdown frontmatter `id` / `ids.json` / Drive's `synced_id`. Failing that, it's Drive's stable file id; failing that, the path. A rename on any device, in the app or in Explorer, becomes a Drive move (history kept) and is replayed on the other devices. A `.txt` renamed in Explorer gets its id back by content.
+- **Merge** (`syncplan.rs`) is three-way: each side against the base saved after the last sync, so offline edits on any number of devices are handled at the next run.
+  - Changed on one side: copied to the other.
+  - Changed on both: **both kept**. Drive's version becomes `Title (conflict YYYY-MM-DD).md` with a new note id, on every device, and the local version keeps the name.
+  - Edited on one side, deleted on the other: the edit wins.
+  - Deleted, unchanged elsewhere: deleted (local → Recycle Bin, Drive → 30-day trash).
+  - Two new notes with one name: the one already on Drive keeps it.
+- **Never silently overwritten.** Every Drive write is conditional: `If-Match: "<version>"`, or `If-None-Match: *` for new files and conflict copies. A `409 conflict` (or `target_exists` / `404`) means Drive moved on, so the step is skipped and the run re-plans within seconds. Before a local file is replaced or deleted, it is hashed again; if it changed since the scan, Drive's version is saved as a conflict copy instead.
+- **Editor saves are guarded too.** The editor sends the text the edit started from. If the file changed on disk meanwhile (sync, git, another editor), the disk version stays, the edit is saved as a conflict copy, and a toast says so. Outside changes reload the editor (`vault-changed` event).
+- **Guards.** A Drive folder that is suddenly empty, or a vault that looks empty, deletes nothing. More than 20 deletions that are also over half the notes wait for *Sync now* (a confirm).
+- **When it runs.** On enable and on vault open, 8 s after a local change, every 2 min to pick up other devices' changes, and on *Sync now*.
+- `.nullnotes/ids.json` isn't synced as a file: both sides' maps are merged. The base and hash cache live in `%LOCALAPPDATA%\dev.nullgrid.notes\backup\sync-<hash>.json`. Switching mode or folder resets the base, so the first run is an add-only merge.
+- **Not covered:** end-to-end-encrypted Drive accounts (as before). A *locked* note edited on two devices gets a conflict copy with the same (encrypted) note id. Empty folders are created but not deleted.
+- **Try it:** `python3 tools/mock_drive.py 8765 mytoken` now implements the sync contract too. `POST /_edit?path=…` plays "another device".
 
 ---
 

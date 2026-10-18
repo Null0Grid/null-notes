@@ -417,3 +417,6 @@ textarea::selection{background:rgba(0,229,255,.25)}
 .status .warn { color: var(--amber); }
 .status .dot.bad { background: var(--amber); box-shadow: 0 0 6px var(--amber); }
 #backupSec .setrow input[type=password] { margin-top: 0; padding: 7px 10px; font-size: 12px; }
+.bkconf { margin-top: 6px; color: var(--amber); }
+.bkconf a { color: var(--cyan); }
+#backupSec select { flex: 1; }

@@ -39,6 +39,15 @@ pub struct BackupCfg {
     pub server: String,
     #[serde(default)]
     pub folder: String,
+    /// "backup" (one way, Phase 6) or "sync" (two way, Phase 7)
+    #[serde(default)]
+    pub mode: String,
+}
+
+impl BackupCfg {
+    pub fn two_way(&self) -> bool {
+        self.mode == "sync"
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -79,6 +88,11 @@ pub struct Status {
     pub moved: usize,
     pub unchanged: usize,
     pub problems: Vec<String>,
+    /// "backup" | "sync"
+    pub mode: String,
+    pub downloaded: usize,
+    /// conflict copies made by the last sync (local paths)
+    pub conflicts: Vec<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -158,7 +172,7 @@ fn enc_seg(s: &str) -> String {
     o
 }
 
-fn enc_path(p: &str) -> String {
+pub(crate) fn enc_path(p: &str) -> String {
     p.split('/').map(enc_seg).collect::<Vec<_>>().join("/")
 }
 
@@ -166,7 +180,7 @@ fn mtime_ms(md: &fs::Metadata) -> i64 {
     md.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
-fn rfc3339_ms(ms: i64) -> String {
+pub(crate) fn rfc3339_ms(ms: i64) -> String {
     let t = time::OffsetDateTime::from_unix_timestamp_nanos(ms as i128 * 1_000_000).unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
     t.format(&time::format_description::well_known::Rfc3339).unwrap_or_default()
 }
@@ -325,11 +339,11 @@ impl Drive {
         format!("{}{}", self.base, path)
     }
 
-    fn req(&self, method: &str, path: &str) -> ureq::Request {
+    pub(crate) fn req(&self, method: &str, path: &str) -> ureq::Request {
         self.agent.request(method, &self.url(path)).set("Authorization", &format!("Bearer {}", self.token))
     }
 
-    fn classify(e: ureq::Error, what: &str) -> DErr {
+    pub(crate) fn classify(e: ureq::Error, what: &str) -> DErr {
         match e {
             ureq::Error::Status(code, resp) => {
                 let body = resp.into_string().unwrap_or_default();
@@ -344,6 +358,9 @@ impl Drive {
                     (400, "invalid_path") => DErr::File(format!("{what}: Null Drive can't store this name")),
                     (400, "invalid_mtime") => DErr::File(format!("{what}: Drive refused its modified time")),
                     (409, "path_collision") => DErr::File(format!("{what}: a file and a folder have the same name on Drive")),
+                    // Phase 7 (notes-sync-drive-api.md): the "re-plan" answers
+                    (409, "conflict") | (409, "target_exists") | (404, "not_found") => DErr::Precondition(what.to_string()),
+                    (428, _) => DErr::Other(format!("{what}: Drive wanted a version check (a Null Notes bug, please report)")),
                     (c, _) if c >= 500 || c == 429 => DErr::Transient(format!("{what}: server error {c}")),
                     (c, e) => DErr::Other(format!("{what}: Drive answered {c}{}", if e.is_empty() { String::new() } else { format!(" ({e})") })),
                 }
@@ -353,7 +370,7 @@ impl Drive {
     }
 
     /// Retry transient failures with backoff; uploads are idempotent.
-    fn retry_with<T>(&self, mut f: impl FnMut() -> Result<T, DErr>) -> Result<T, DErr> {
+    pub(crate) fn retry_with<T>(&self, mut f: impl FnMut() -> Result<T, DErr>) -> Result<T, DErr> {
         let mut attempt = 0;
         loop {
             match f() {
@@ -366,7 +383,7 @@ impl Drive {
         }
     }
 
-    fn retry<T>(&self, what: &str, mut f: impl FnMut() -> Result<T, ureq::Error>) -> Result<T, DErr> {
+    pub(crate) fn retry<T>(&self, what: &str, mut f: impl FnMut() -> Result<T, ureq::Error>) -> Result<T, DErr> {
         self.retry_with(|| f().map_err(|e| Self::classify(e, what)))
     }
 
@@ -424,6 +441,7 @@ impl Drive {
         match self.retry(remote, || self.req("DELETE", &format!("/api/v1/files/{}", enc_path(remote))).set("If-Match", "*").call()) {
             Ok(_) => Ok(()),
             Err(DErr::Other(m)) if m.contains("answered 404") => Ok(()), // already gone
+            Err(DErr::Precondition(_)) => Ok(()),                         // 404 not_found: already gone
             Err(e) => Err(e),
         }
     }
@@ -652,6 +670,9 @@ struct Inner {
     status: Status,
     kicked_at: Option<Instant>,
     run_now: bool,
+    /// next run may delete many files ("Sync now" pressed)
+    force: bool,
+    quick_retries: u8,
     retry_at: Option<Instant>,
     retry_delay: Duration,
 }
@@ -667,6 +688,9 @@ pub struct Backup {
     pub debounce: Duration,
     /// A run at least this often while on (also retries failures).
     pub periodic: Duration,
+    /// Two-way sync: look for changes on Drive this often.
+    pub periodic_sync: Duration,
+    pub debounce_sync: Duration,
 }
 
 impl Backup {
@@ -678,6 +702,8 @@ impl Backup {
                 status: Status { state: "off".into(), ..Default::default() },
                 kicked_at: None,
                 run_now: false,
+                force: false,
+                quick_retries: 0,
                 retry_at: None,
                 retry_delay: Duration::from_secs(60),
             }),
@@ -688,6 +714,8 @@ impl Backup {
             notify,
             debounce: Duration::from_secs(20),
             periodic: Duration::from_secs(15 * 60),
+            periodic_sync: Duration::from_secs(2 * 60),
+            debounce_sync: Duration::from_secs(8),
         });
         let me = Arc::downgrade(&b);
         std::thread::spawn(move || loop {
@@ -721,6 +749,19 @@ impl Backup {
         fs::read(self.state_path(root)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
     }
 
+    fn sync_state_path(&self, root: &Path) -> PathBuf {
+        self.state_dir.join(format!("sync-{:016x}.json", fnv(&root.display().to_string())))
+    }
+
+    fn load_sync_state(&self, root: &Path) -> crate::sync::SyncState {
+        fs::read(self.sync_state_path(root)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    }
+
+    fn save_sync_state(&self, root: &Path, st: &crate::sync::SyncState) {
+        let _ = fs::create_dir_all(&self.state_dir);
+        let _ = atomic_write(&self.sync_state_path(root), serde_json::to_string(st).unwrap().as_bytes());
+    }
+
     fn save_state(&self, root: &Path, st: &State) {
         let _ = fs::create_dir_all(&self.state_dir);
         let _ = atomic_write(&self.state_path(root), serde_json::to_string(st).unwrap().as_bytes());
@@ -732,6 +773,7 @@ impl Backup {
         g.status.server = g.cfg.server.clone();
         g.status.default_folder = default_folder(&name);
         g.status.folder = if g.cfg.folder.is_empty() { default_folder(&name) } else { g.cfg.folder.clone() };
+        g.status.mode = if g.cfg.two_way() { "sync".into() } else { "backup".into() };
         g.status.has_token = !g.cfg.server.is_empty() && secrets::get(&self.secrets_dir, &g.cfg.server).is_some();
         if !g.status.enabled {
             g.status.state = "off".into();
@@ -765,7 +807,7 @@ impl Backup {
     }
 
     /// Save settings from the Settings screen. `token: Some("")` removes it.
-    pub fn configure(&self, enabled: bool, server: &str, folder: &str, token: Option<&str>) -> Result<Status, String> {
+    pub fn configure(&self, enabled: bool, server: &str, folder: &str, token: Option<&str>, mode: &str) -> Result<Status, String> {
         let mut g = self.inner.lock().unwrap();
         let Some((root, name)) = g.vault.clone() else { return Err("Open a vault first.".into()) };
         let server = if server.trim().is_empty() && !enabled { String::new() } else { clean_server(server)? };
@@ -782,13 +824,19 @@ impl Backup {
         if enabled && secrets::get(&self.secrets_dir, &server).is_none() {
             return Err("Paste a Null Drive API token to turn on backup.".into());
         }
-        let cfg = BackupCfg { enabled, server, folder };
+        let mode = if mode == "sync" { "sync" } else { "backup" };
+        let cfg = BackupCfg { enabled, server, folder, mode: mode.into() };
         let target_changed = cfg.server != g.cfg.server || cfg.folder != g.cfg.folder;
+        let mode_changed = cfg.mode != g.cfg.mode;
         self.save_cfg(&root, &cfg)?;
         g.cfg = cfg;
         if target_changed {
             // New destination: forget what was sent where.
             self.save_state(&root, &State::default());
+        }
+        if target_changed || mode_changed {
+            // The first two-way run then merges both sides (adds only, never deletes).
+            self.save_sync_state(&root, &crate::sync::SyncState::default());
         }
         g.status.message.clear();
         g.status.state = if enabled { "idle".into() } else { "off".into() };
@@ -835,14 +883,15 @@ impl Backup {
     pub fn back_up_now(&self) {
         let mut g = self.inner.lock().unwrap();
         g.run_now = true;
+        g.force = true; // the user asked: large deletions held back last time may go ahead
         self.cv.notify_all();
     }
 
     /// The app renamed or moved something: replay it as a Drive move later.
     pub fn renamed(&self, from: &str, to: &str) {
         let g = self.inner.lock().unwrap();
-        if !(g.cfg.enabled) {
-            return;
+        if !g.cfg.enabled || g.cfg.two_way() {
+            return; // two-way sync recognises renames by note id itself
         }
         if let Some((root, _)) = g.vault.clone() {
             let mut st = self.load_state(&root);
@@ -857,12 +906,13 @@ impl Backup {
         loop {
             let on = g.cfg.enabled && g.vault.is_some();
             let now = Instant::now();
+            let (debounce, periodic) = if g.cfg.two_way() { (self.debounce_sync, self.periodic_sync) } else { (self.debounce, self.periodic) };
             if on {
                 if g.run_now {
                     return true;
                 }
                 if let Some(k) = g.kicked_at {
-                    if now.duration_since(k) >= self.debounce {
+                    if now.duration_since(k) >= debounce {
                         return true;
                     }
                 }
@@ -872,9 +922,9 @@ impl Backup {
                     }
                 }
             }
-            let mut wait = self.periodic;
+            let mut wait = periodic;
             if let Some(k) = g.kicked_at {
-                wait = wait.min((k + self.debounce).saturating_duration_since(now));
+                wait = wait.min((k + debounce).saturating_duration_since(now));
             }
             if let Some(r) = g.retry_at {
                 wait = wait.min(r.saturating_duration_since(now));
@@ -889,21 +939,25 @@ impl Backup {
     }
 
     pub fn run_now_blocking(&self) {
-        let (root, cfg) = {
+        let (root, cfg, force) = {
             let mut g = self.inner.lock().unwrap();
             g.run_now = false;
             g.kicked_at = None;
             g.retry_at = None;
+            let force = std::mem::take(&mut g.force);
             let Some((root, _)) = g.vault.clone() else { return };
             if !g.cfg.enabled {
                 return;
             }
             self.refresh_status(&mut g);
             g.status.state = "running".into();
-            g.status.message = "Backing up…".into();
+            g.status.message = if g.cfg.two_way() { "Syncing…".into() } else { "Backing up…".into() };
             self.publish(&g);
-            (root, g.cfg.clone())
+            (root, g.cfg.clone(), force)
         };
+        if cfg.two_way() {
+            return self.sync_now_blocking(root, cfg, force);
+        }
         let folder = if cfg.folder.is_empty() { default_folder(&root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()) } else { cfg.folder.clone() };
         let result = match secrets::get(&self.secrets_dir, &cfg.server) {
             None => Err(DErr::Other("Paste a Null Drive API token in Settings → Back up to Null Drive.".into())),
@@ -933,6 +987,8 @@ impl Backup {
                 g.status.deleted = rep.deleted.len();
                 g.status.moved = rep.moved;
                 g.status.unchanged = rep.unchanged;
+                g.status.downloaded = 0;
+                g.status.conflicts.clear();
                 g.status.message = if rep.problems.is_empty() { "Backed up.".into() } else { format!("Backed up, {} problem{}.", rep.problems.len(), if rep.problems.len() == 1 { "" } else { "s" }) };
                 g.status.problems = rep.problems;
                 g.retry_delay = Duration::from_secs(60);
@@ -942,6 +998,77 @@ impl Backup {
                 g.status.message = e.user_message();
                 // Network trouble retries on its own; token/encryption problems wait for the user.
                 if matches!(e, DErr::Transient(_) | DErr::Other(_)) {
+                    g.retry_at = Some(Instant::now() + g.retry_delay);
+                    g.retry_delay = (g.retry_delay * 2).min(Duration::from_secs(30 * 60));
+                }
+            }
+        }
+        self.refresh_status(&mut g);
+        self.publish(&g);
+    }
+}
+
+impl Backup {
+    /// One two-way sync run (Phase 7), with quick re-runs when Drive or the
+    /// disk changed under it.
+    fn sync_now_blocking(&self, root: PathBuf, cfg: BackupCfg, force: bool) {
+        let folder = if cfg.folder.is_empty() { default_folder(&root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()) } else { cfg.folder.clone() };
+        let result = match secrets::get(&self.secrets_dir, &cfg.server) {
+            None => Err(DErr::Other("Paste a Null Drive API token in Settings → Null Drive.".into())),
+            Some(token) => match Drive::new(&cfg.server, &token) {
+                Err(e) => Err(DErr::Other(e)),
+                Ok(drive) => (|| {
+                    let me = drive.me()?;
+                    if me.e2ee != "off" {
+                        return Err(DErr::E2ee);
+                    }
+                    drive.mkdir(&folder)?;
+                    let mut st = self.load_sync_state(&root);
+                    if st.server != cfg.server || st.folder != folder {
+                        st = crate::sync::SyncState { server: cfg.server.clone(), folder: folder.clone(), ..Default::default() };
+                    }
+                    let remote = crate::sync::DriveRemote { drive: &drive, folder: folder.clone() };
+                    let r = crate::sync::run_sync(&root, &remote, &mut st, force);
+                    self.save_sync_state(&root, &st);
+                    r
+                })(),
+            },
+        };
+        let mut g = self.inner.lock().unwrap();
+        if g.vault.as_ref().map(|v| v.0 != root).unwrap_or(true) {
+            return;
+        }
+        g.status.last_run = Some(now_rfc3339());
+        match result {
+            Ok(rep) => {
+                g.status.state = "idle".into();
+                g.status.last_ok = g.status.last_run.clone();
+                g.status.uploaded = rep.uploaded.len();
+                g.status.downloaded = rep.downloaded.len();
+                g.status.deleted = rep.deleted_local.len() + rep.deleted_remote.len();
+                g.status.moved = rep.moved.len();
+                g.status.unchanged = 0;
+                g.status.conflicts = rep.conflicts.clone();
+                g.status.message = match (rep.conflicts.len(), rep.problems.len()) {
+                    (0, 0) => "Synced.".into(),
+                    (c, 0) => format!("Synced. {c} note{} changed in both places: both versions kept.", if c == 1 { "" } else { "s" }),
+                    (0, p) => format!("Synced, {p} problem{}.", if p == 1 { "" } else { "s" }),
+                    (c, p) => format!("Synced. {c} kept-both conflict{}, {p} problem{}.", if c == 1 { "" } else { "s" }, if p == 1 { "" } else { "s" }),
+                };
+                g.status.problems = rep.problems;
+                g.retry_delay = Duration::from_secs(60);
+                if rep.retry && g.quick_retries < 3 {
+                    // something changed under us: look again in a moment
+                    g.quick_retries += 1;
+                    g.retry_at = Some(Instant::now() + Duration::from_secs(3));
+                } else {
+                    g.quick_retries = 0;
+                }
+            }
+            Err(e) => {
+                g.status.state = "error".into();
+                g.status.message = e.user_message();
+                if matches!(e, DErr::Transient(_) | DErr::Other(_) | DErr::Precondition(_)) {
                     g.retry_at = Some(Instant::now() + g.retry_delay);
                     g.retry_delay = (g.retry_delay * 2).min(Duration::from_secs(30 * 60));
                 }
@@ -1280,15 +1407,15 @@ mod tests {
         b.set_vault(Some((root.clone(), "Work".into())));
         assert_eq!(b.status().state, "off", "off by default");
         assert_eq!(b.status().folder, "Null Notes/Work");
-        assert!(b.configure(true, &m.url, "", None).is_err(), "needs a token");
-        let st = b.configure(true, &m.url, "/Null Notes/Work/", Some("tok")).unwrap();
+        assert!(b.configure(true, &m.url, "", None, "backup").is_err(), "needs a token");
+        let st = b.configure(true, &m.url, "/Null Notes/Work/", Some("tok"), "backup").unwrap();
         assert!(st.enabled && st.has_token);
         let wait = |pred: &dyn Fn() -> bool| { for _ in 0..300 { if pred() { return true; } std::thread::sleep(Duration::from_millis(20)); } false };
         assert!(wait(&|| b.status().last_ok.is_some()), "first run after turning it on");
         assert_eq!(m.s.lock().unwrap().files.len(), 8);
         assert!(!fs::read_to_string(cfgdir.join("backup.json")).unwrap().contains("tok"), "token not in the config file");
         // turning it off stops runs
-        b.configure(false, &m.url, "", None).unwrap();
+        b.configure(false, &m.url, "", None, "backup").unwrap();
         fs::write(root.join("new.md"), "x").unwrap();
         b.kick();
         std::thread::sleep(Duration::from_millis(200));

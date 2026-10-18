@@ -1155,10 +1155,14 @@ async function openSettings() {
        <div class="setnote ${/^Listening/.test(ag.status) ? "" : "warn"}" id="sAgentStatus">${esc(ag.status)}</div>
      </div>` : ""}
      ${bk ? `<div class="setsec" id="backupSec">
-       <h3>Back up to Null Drive <span class="badge k-md">ADD-ON</span></h3>
-       ${tog("sBackup", "Back up this vault to Null Drive", bk.enabled)}
+       <h3>Null Drive <span class="badge k-md">ADD-ON</span></h3>
+       ${tog("sBackup", "Connect this vault to Null Drive", bk.enabled)}
        <div class="sub" id="backupSub" ${bk.enabled ? "" : "hidden"}>
-         <div class="setnote">One way: changes in this vault are copied to your Drive. Nothing on Drive is ever copied back here. Files you delete go to Drive's Recently deleted for 30 days.</div>
+         <div class="setrow"><span>Mode</span><select id="sBkMode">
+           <option value="backup" ${bk.mode !== "sync" ? "selected" : ""}>Back up: this computer → Drive</option>
+           <option value="sync" ${bk.mode === "sync" ? "selected" : ""}>Two-way sync: also bring changes from your other devices</option>
+         </select></div>
+         <div class="setnote" id="sBkModeNote"></div>
          <div class="setrow"><span>Null Drive address</span><input type="text" id="sBkServer" value="${esc(bk.server)}" placeholder="https://drive.example.com" spellcheck="false"></div>
          <div class="setrow"><span>API token</span><input type="password" id="sBkToken" value="" autocomplete="off" placeholder="${bk.has_token ? "Saved. Paste a new one to replace it" : "Paste a token from Drive"}" spellcheck="false"></div>
          <div class="setnote">In Drive: Settings → Devices → Add device → Create an API token instead, scope <b>Everything</b>. The token is kept in Windows Credential Manager.</div>
@@ -1185,6 +1189,15 @@ async function openSettings() {
       if (bk) {
         const q = (id) => form.querySelector("#" + id);
         q("sBackup").onchange = (e) => (q("backupSub").hidden = !e.target.checked);
+        const modeNote = () => {
+          const two = q("sBkMode").value === "sync";
+          q("sBkModeNote").textContent = two
+            ? "Changes go both ways, matched by note, so renames on any device follow. If a note changed in two places, both versions are kept as \"Title (conflict YYYY-MM-DD)\". Deletes go to the Recycle Bin here and to Drive's Recently deleted for 30 days."
+            : "One way: changes in this vault are copied to your Drive. Nothing on Drive is ever copied back here. Files you delete go to Drive's Recently deleted for 30 days. Use two-way sync if other devices write to this folder.";
+          q("sBkNow").textContent = two ? "Sync now" : "Back up now";
+        };
+        q("sBkMode").onchange = modeNote;
+        modeNote();
         drawBackupStatus(q("sBkStatus"), bk);
         q("sBkTest").onclick = async () => {
           const b = q("sBkTest"); b.disabled = true; q("sBkStatus").textContent = "Connecting…"; q("sBkStatus").className = "setnote";
@@ -1210,7 +1223,7 @@ async function openSettings() {
         st.lock.enabled = v("sLock").checked;
         st.lock.autoLockMin = +v("sLockMin").value;
         if (ag) st.__origin = v("sOrigin").value.trim();
-        if (bk) st.__backup = { enabled: v("sBackup").checked, server: v("sBkServer").value.trim(), folder: v("sBkFolder").value.trim(), token: v("sBkToken").value.trim() || null };
+        if (bk) st.__backup = { enabled: v("sBackup").checked, mode: v("sBkMode").value, server: v("sBkServer").value.trim(), folder: v("sBkFolder").value.trim(), token: v("sBkToken").value.trim() || null };
         done(st);
       };
     }, true
@@ -1228,7 +1241,7 @@ async function openSettings() {
   if ("__backup" in result) {
     const b = result.__backup;
     delete result.__backup;
-    const changed = b.token || b.enabled !== bk.enabled || (b.enabled && (b.server !== bk.server || (b.folder || bk.default_folder) !== bk.folder));
+    const changed = b.token || b.enabled !== bk.enabled || (b.enabled && (b.mode !== bk.mode || b.server !== bk.server || (b.folder || bk.default_folder) !== bk.folder));
     if (changed) {
       try { BK = await api("backup_configure", b); drawNet(); }
       catch (e) { toast(errText(e), true); return; }
@@ -1769,9 +1782,12 @@ function drawNet() {
   const on = BK && BK.enabled;
   let label = "LOCAL · NO NETWORK", title = "Notes are stored on this computer";
   if (on) {
-    const st = { idle: BK.last_ok ? "BACKED UP " + agoText(BK.last_ok).toUpperCase() : "BACKUP ON", waiting: "BACKUP PENDING", running: "BACKING UP…", error: "BACKUP ERROR" }[BK.state] || "BACKUP ON";
-    label = "LOCAL + DRIVE · " + st;
-    title = `Backed up one way to ${BK.server} › ${BK.folder}` + (BK.state === "error" ? "\n" + BK.message : "");
+    const two = BK.mode === "sync";
+    const st = two
+      ? { idle: BK.last_ok ? "SYNCED " + agoText(BK.last_ok).toUpperCase() : "SYNC ON", waiting: "SYNC PENDING", running: "SYNCING…", error: "SYNC ERROR" }[BK.state] || "SYNC ON"
+      : { idle: BK.last_ok ? "BACKED UP " + agoText(BK.last_ok).toUpperCase() : "BACKUP ON", waiting: "BACKUP PENDING", running: "BACKING UP…", error: "BACKUP ERROR" }[BK.state] || "BACKUP ON";
+    label = (two ? "LOCAL ⇄ DRIVE · " : "LOCAL + DRIVE · ") + st;
+    title = (two ? `Synced both ways with ${BK.server} › ${BK.folder}` : `Backed up one way to ${BK.server} › ${BK.folder}`) + (BK.state === "error" ? "\n" + BK.message : "");
   }
   el.innerHTML = `<span class="dot${on && BK.state === "error" ? " bad" : ""}"></span>${esc(label)}`;
   el.title = title;
@@ -1780,19 +1796,39 @@ function drawNet() {
 function drawBackupStatus(box, b) {
   if (!box || !b) return;
   const parts = [];
-  if (b.state === "running") parts.push("Backing up…");
+  const two = b.mode === "sync";
+  if (b.state === "running") parts.push(two ? "Syncing…" : "Backing up…");
   else if (b.message) parts.push(b.message);
-  if (b.last_ok) parts.push(`Last backup ${agoText(b.last_ok)}: ${b.uploaded} sent, ${b.deleted} to Drive's trash${b.moved ? `, ${b.moved} moved` : ""}, ${b.unchanged} unchanged.`);
-  box.innerHTML = esc(parts.join(" ")) + (b.problems && b.problems.length ? `<ul class="bkprob">${b.problems.slice(0, 8).map((p) => `<li>${esc(p)}</li>`).join("")}${b.problems.length > 8 ? `<li>…and ${b.problems.length - 8} more</li>` : ""}</ul>` : "");
+  if (b.last_ok && two) parts.push(`Last sync ${agoText(b.last_ok)}: ${b.uploaded} sent, ${b.downloaded} received${b.moved ? `, ${b.moved} renamed` : ""}${b.deleted ? `, ${b.deleted} deleted` : ""}.`);
+  else if (b.last_ok) parts.push(`Last backup ${agoText(b.last_ok)}: ${b.uploaded} sent, ${b.deleted} to Drive's trash${b.moved ? `, ${b.moved} moved` : ""}, ${b.unchanged} unchanged.`);
+  const conf = (b.conflicts || []).length ? `<div class="bkconf">Both versions kept: ${b.conflicts.slice(0, 8).map((c) => `<a href="#" data-open="${esc(c)}">${esc(fileName(c))}</a>`).join(", ")}</div>` : "";
+  box.innerHTML = esc(parts.join(" ")) + conf + (b.problems && b.problems.length ? `<ul class="bkprob">${b.problems.slice(0, 8).map((p) => `<li>${esc(p)}</li>`).join("")}${b.problems.length > 8 ? `<li>…and ${b.problems.length - 8} more</li>` : ""}</ul>` : "");
   box.className = "setnote" + (b.state === "error" ? " warn" : "");
 }
+let lastConflicts = "";
 function onBackupStatus(b) {
   BK = b;
   drawNet();
   drawBackupStatus(document.getElementById("sBkStatus"), b);
-  if (b.state === "error" && b.message !== lastBkError) toast("Backup: " + b.message, true);
+  const what = b.mode === "sync" ? "Sync" : "Backup";
+  if (b.state === "error" && b.message !== lastBkError) toast(what + ": " + b.message, true);
   lastBkError = b.state === "error" ? b.message : "";
+  const c = (b.conflicts || []).join("|");
+  if (c && c !== lastConflicts && b.state === "idle") {
+    toast(`Changed in two places, so both versions were kept: ${b.conflicts.slice(0, 3).map(fileName).join(", ")}${b.conflicts.length > 3 ? "…" : ""}`, true);
+  }
+  if (b.state === "idle") lastConflicts = c;
 }
+// conflict links in Settings open the copy
+document.addEventListener("click", (e) => {
+  const a = e.target.closest && e.target.closest("[data-open]");
+  if (!a) return;
+  e.preventDefault();
+  const p = a.dataset.open;
+  const m = document.getElementById("modal");
+  if (m && !m.hidden) { const c = m.querySelector("[data-cancel]"); if (c) c.click(); }
+  refresh().then(() => { if (S.byPath.has(p)) open(p); });
+});
 
 /* ---------------- nullnotes://open?id= links ---------------- */
 let linkBusy = Promise.resolve();

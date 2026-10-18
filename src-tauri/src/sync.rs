@@ -21,6 +21,7 @@ use crate::vault::{atomic_write, Vault, META_DIR};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
+use std::io::Read;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
@@ -49,6 +50,116 @@ pub trait Remote {
     fn mv(&self, from: &str, to: &str, version: i64) -> Result<(), DErr>;
     /// ids.json is merged, not versioned: last writer wins on the file itself.
     fn put_any(&self, path: &str, data: &[u8]) -> Result<(), DErr>;
+}
+
+/* ======================= Null Drive over HTTP ======================= */
+
+/// [`Remote`] for a vault folder on Null Drive (server 0.8.2+), per
+/// `null-grid/notes-sync-drive-api.md`: versions are ETags, writes are
+/// conditional (`If-Match: "<v>"` / `If-None-Match: *`), a mismatch is
+/// `409 conflict` → `DErr::Precondition` → the engine re-plans.
+pub struct DriveRemote<'a> {
+    pub drive: &'a crate::backup::Drive,
+    /// "Null Notes/Work", no slashes at the ends
+    pub folder: String,
+}
+
+impl DriveRemote<'_> {
+    fn full(&self, rel: &str) -> String {
+        format!("{}/{}", self.folder, rel)
+    }
+    fn files_url(&self, rel: &str) -> String {
+        format!("/api/v1/files/{}", crate::backup::enc_path(&self.full(rel)))
+    }
+}
+
+impl Remote for DriveRemote<'_> {
+    fn list(&self) -> Result<Vec<RFile>, DErr> {
+        let url = format!("/api/v1/files?prefix={}", crate::backup::enc_path(&self.folder));
+        let v: serde_json::Value = self
+            .drive
+            .retry("listing", || self.drive.req("GET", &url).call())?
+            .into_json()
+            .map_err(|e| DErr::Other(format!("listing: {e}")))?;
+        let pre = format!("{}/", self.folder);
+        Ok(v.get("files")
+            .and_then(|f| f.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[])
+            .iter()
+            .filter(|f| !f.get("is_dir").and_then(|x| x.as_bool()).unwrap_or(false))
+            .filter(|f| !f.get("deleted").and_then(|x| x.as_bool()).unwrap_or(false))
+            .filter_map(|f| {
+                let path = f.get("path")?.as_str()?.trim_matches('/');
+                Some(RFile {
+                    path: path.strip_prefix(&pre)?.to_string(),
+                    drive_id: f.get("id")?.as_str()?.to_string(),
+                    version: f.get("version")?.as_i64()?,
+                    sha: f.get("sha256").and_then(|x| x.as_str()).unwrap_or("").to_ascii_lowercase(),
+                    synced_id: f.get("synced_id").and_then(|x| x.as_str()).map(|s| s.to_lowercase()),
+                })
+            })
+            .collect())
+    }
+
+    fn get(&self, rel: &str) -> Result<Vec<u8>, DErr> {
+        let url = self.files_url(rel);
+        self.drive.retry_with(|| {
+            let r = self.drive.req("GET", &url).call().map_err(|e| crate::backup::Drive::classify(e, rel))?;
+            let want = r.header("X-Content-SHA256").map(|s| s.to_ascii_lowercase());
+            let mut buf = Vec::new();
+            r.into_reader().read_to_end(&mut buf).map_err(|e| DErr::Transient(format!("{rel}: {e}")))?;
+            if let Some(w) = want {
+                if w != crate::backup::sha256_hex(&buf) {
+                    return Err(DErr::Transient(format!("{rel}: download was cut short")));
+                }
+            }
+            Ok(buf)
+        })
+    }
+
+    fn put(&self, rel: &str, data: &[u8], mtime_ms: i64, expect: &Expect) -> Result<(), DErr> {
+        let url = self.files_url(rel);
+        let sha = crate::backup::sha256_hex(data);
+        self.drive.retry_with(|| {
+            let mut req = self.drive.req("PUT", &url)
+                .set("X-Content-SHA256", &sha) // makes a retried write idempotent (200, not 409)
+                .set("X-NullDrive-Mtime", &crate::backup::rfc3339_ms(mtime_ms))
+                .set("Content-Type", "application/octet-stream");
+            req = match expect {
+                Expect::Absent => req.set("If-None-Match", "*"),
+                Expect::Version(v) => req.set("If-Match", &format!("\"{v}\"")),
+            };
+            req.send_bytes(data).map(|_| ()).map_err(|e| crate::backup::Drive::classify(e, rel))
+        })
+    }
+
+    fn put_any(&self, rel: &str, data: &[u8]) -> Result<(), DErr> {
+        let url = self.files_url(rel);
+        let sha = crate::backup::sha256_hex(data);
+        self.drive.retry(rel, || {
+            self.drive.req("PUT", &url).set("If-Match", "*").set("X-Content-SHA256", &sha).set("Content-Type", "application/json").send_bytes(data)
+        }).map(|_| ())
+    }
+
+    fn delete(&self, rel: &str, version: i64) -> Result<(), DErr> {
+        let url = self.files_url(rel);
+        match self.drive.retry(rel, || self.drive.req("DELETE", &url).set("If-Match", &format!("\"{version}\"")).call()) {
+            Ok(_) => Ok(()),
+            // 404: already gone is fine; 409 conflict: edited on Drive since -> re-plan
+            Err(DErr::Precondition(m)) => {
+                if self.list()?.iter().any(|f| f.path == rel) { Err(DErr::Precondition(m)) } else { Ok(()) }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn mv(&self, from: &str, to: &str, version: i64) -> Result<(), DErr> {
+        let body = serde_json::json!({ "from": self.full(from), "to": self.full(to), "if_match": version });
+        self.drive
+            .retry(from, || self.drive.req("POST", "/api/v1/files/move").set("If-Match", &format!("\"{version}\"")).send_json(body.clone()))
+            .map(|_| ())
+    }
 }
 
 /* ======================= state ======================= */
@@ -201,6 +312,25 @@ fn make_conflict_copy(v: &Vault, rel_copy: &str, data: &[u8], remote: &dyn Remot
     Ok(())
 }
 
+/// A txt/html/canvas note renamed outside the app loses its id (ids.json is
+/// keyed by path). If its content is exactly that of a synced note whose old
+/// path is gone, it is that note: give the id back, so the rename becomes a
+/// Drive move (history kept) instead of delete + new file.
+fn reattach_ids(v: &Vault, litems: &mut [LItem], base: &[BItem]) {
+    let present: HashSet<String> = litems.iter().map(|l| l.path.to_lowercase()).collect();
+    let mut used = HashSet::new();
+    for l in litems.iter_mut().filter(|l| l.note_id.is_none() && is_textnote(&l.path)) {
+        if let Some(b) = base.iter().find(|b| {
+            b.key.starts_with("n:") && !present.contains(&b.local_path.to_lowercase()) && b.local_sha == l.sha && !used.contains(&b.key)
+        }) {
+            used.insert(b.key.clone());
+            let id = b.key[2..].to_string();
+            noteid::sidecar_set(&v.root, &l.path, &id);
+            l.note_id = Some(id);
+        }
+    }
+}
+
 /* ======================= one sync run ======================= */
 
 pub fn conflict_name_for(v: &Vault) -> impl Fn(&str, &HashSet<String>) -> String + '_ {
@@ -229,7 +359,8 @@ pub fn run_sync(root: &Path, remote: &dyn Remote, st: &mut SyncState, allow_mass
     let rfiles = remote.list()?;
     let rids = remote_ids(remote, &rfiles)?;
     let ritems = to_items(&rfiles, &rids);
-    let litems = scan_local(root, &mut st.cache).map_err(DErr::Other)?;
+    let mut litems = scan_local(root, &mut st.cache).map_err(DErr::Other)?;
+    reattach_ids(&v, &mut litems, &st.base);
 
     let cname = conflict_name_for(&v);
     let plan = syncplan::plan(&litems, &ritems, &st.base, &cname, allow_mass_delete);
@@ -715,5 +846,279 @@ mod tests {
         assert_eq!(a.files(), b.files());
         assert_eq!(a.files().len(), 2);
         assert_eq!(a.read("Ideas.md"), "A's ideas", "the one on Drive first keeps the name");
+    }
+}
+
+#[cfg(test)]
+pub mod httpmock {
+    //! Null Drive's Phase 7 semantics over real HTTP (notes-sync-drive-api.md).
+    use crate::noteid;
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+    use tiny_http::{Header, Response, Server};
+
+    #[derive(Clone, Debug)]
+    pub struct F {
+        pub id: String,
+        pub version: i64,
+        pub data: Vec<u8>,
+    }
+
+    #[derive(Default)]
+    pub struct S {
+        pub files: BTreeMap<String, F>,
+        pub trash: Vec<String>,
+        pub counter: i64,
+        pub log: Vec<String>,
+        pub hook: Option<Box<dyn FnMut(&mut S) + Send>>,
+    }
+
+    impl S {
+        pub fn bump(&mut self) -> i64 {
+            self.counter += 1;
+            self.counter
+        }
+    }
+
+    pub struct Mock {
+        pub url: String,
+        pub s: Arc<Mutex<S>>,
+    }
+
+    fn sha(b: &[u8]) -> String {
+        crate::backup::sha256_hex(b)
+    }
+    fn dec(p: &str) -> String {
+        let b = p.as_bytes();
+        let mut o = Vec::new();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'%' && i + 2 < b.len() {
+                o.push(u8::from_str_radix(&p[i + 1..i + 3], 16).unwrap());
+                i += 3;
+            } else {
+                o.push(b[i]);
+                i += 1;
+            }
+        }
+        String::from_utf8(o).unwrap()
+    }
+    fn row(p: &str, f: &F) -> serde_json::Value {
+        let synced = if noteid::is_md(p) { noteid::get_id(&String::from_utf8_lossy(&f.data)) } else { None };
+        serde_json::json!({"id": f.id, "path": p, "is_dir": false, "size": f.data.len(), "sha256": sha(&f.data), "version": f.version, "deleted": false, "synced_id": synced})
+    }
+
+    pub fn start(token: &str) -> Mock {
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let url = format!("http://127.0.0.1:{}", server.server_addr().to_ip().unwrap().port());
+        let s = Arc::new(Mutex::new(S::default()));
+        let st = s.clone();
+        let token = token.to_string();
+        std::thread::spawn(move || {
+            for mut req in server.incoming_requests() {
+                let j = |code: u16, v: serde_json::Value| Response::from_string(v.to_string()).with_status_code(code).with_header(Header::from_bytes("Content-Type", "application/json").unwrap());
+                let err = |code: u16, c: &str, cur: Option<serde_json::Value>| j(code, serde_json::json!({"error": {"code": c, "message": c, "current": cur}}));
+                let hdr = |r: &tiny_http::Request, n: &str| r.headers().iter().find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(n)).map(|h| h.value.to_string());
+                if hdr(&req, "Authorization") != Some(format!("Bearer {token}")) {
+                    let _ = req.respond(err(401, "unauthorized", None));
+                    continue;
+                }
+                let method = req.method().to_string();
+                let url = req.url().to_string();
+                let (path, query) = url.split_once('?').map(|(a, b)| (a.to_string(), b.to_string())).unwrap_or((url.clone(), String::new()));
+                let mut body = Vec::new();
+                let _ = req.as_reader().read_to_end(&mut body);
+                let if_match = hdr(&req, "If-Match").map(|v| v.trim_matches('"').to_string());
+                let if_none = hdr(&req, "If-None-Match");
+                let claimed = hdr(&req, "X-Content-SHA256");
+                let mut g = st.lock().unwrap();
+                g.log.push(format!("{method} {}", dec(&path)));
+                if method != "GET" {
+                    if let Some(mut h) = g.hook.take() {
+                        h(&mut g);
+                    }
+                }
+                match (method.as_str(), path.as_str()) {
+                    ("GET", "/api/v1/me") => { let _ = req.respond(j(200, serde_json::json!({"user":{"name":"luke","e2ee":"off"}}))); }
+                    ("POST", "/api/v1/folders") => { let _ = req.respond(j(200, serde_json::json!({}))); }
+                    ("GET", "/api/v1/files") => {
+                        let prefix = dec(query.split('&').find_map(|kv| kv.strip_prefix("prefix=")).unwrap_or(""));
+                        let rows: Vec<serde_json::Value> = g.files.iter().filter(|(p, _)| p.starts_with(&format!("{prefix}/"))).map(|(p, f)| row(p, f)).collect();
+                        let v = g.counter;
+                        let _ = req.respond(j(200, serde_json::json!({"version": v, "files": rows})));
+                    }
+                    ("GET", p) if p.starts_with("/api/v1/files/") => {
+                        let rp = dec(&p["/api/v1/files/".len()..]);
+                        match g.files.get(&rp) {
+                            Some(f) => {
+                                let r = Response::from_data(f.data.clone())
+                                    .with_header(Header::from_bytes("ETag", format!("\"{}\"", f.version)).unwrap())
+                                    .with_header(Header::from_bytes("X-Content-SHA256", sha(&f.data)).unwrap())
+                                    .with_header(Header::from_bytes("X-NullDrive-File-Id", f.id.clone()).unwrap());
+                                let _ = req.respond(r);
+                            }
+                            None => { let _ = req.respond(err(404, "not_found", None)); }
+                        }
+                    }
+                    ("PUT", p) if p.starts_with("/api/v1/files/") => {
+                        let rp = dec(&p["/api/v1/files/".len()..]);
+                        let cur = g.files.get(&rp).cloned();
+                        let same = cur.as_ref().map(|f| claimed.as_deref() == Some(sha(&f.data).as_str())).unwrap_or(false);
+                        let curj = cur.as_ref().map(|f| row(&rp, f));
+                        let ok = match (&if_none, &if_match, &cur) {
+                            (Some(_), Some(_), _) => { let _ = req.respond(err(400, "invalid_if_match", None)); continue; }
+                            (Some(n), None, c) => { if n != "*" { let _ = req.respond(err(400, "invalid_if_match", None)); continue; } c.is_none() || same }
+                            (None, Some(m), _) if m == "*" => true,
+                            (None, Some(m), Some(f)) => f.version.to_string() == *m || same,
+                            (None, Some(_), None) => false,
+                            (None, None, Some(_)) => { let _ = req.respond(err(428, "precondition_required", None)); continue; }
+                            (None, None, None) => true,
+                        };
+                        if !ok { let _ = req.respond(err(409, "conflict", curj)); continue; }
+                        if same { let _ = req.respond(j(200, curj.unwrap())); continue; }
+                        let v = g.bump();
+                        let id = cur.map(|f| f.id).unwrap_or_else(|| format!("{v:032x}"));
+                        let f = F { id, version: v, data: body };
+                        let r = row(&rp, &f);
+                        g.files.insert(rp, f);
+                        let _ = req.respond(j(200, r));
+                    }
+                    ("DELETE", p) if p.starts_with("/api/v1/files/") => {
+                        let rp = dec(&p["/api/v1/files/".len()..]);
+                        match g.files.get(&rp).cloned() {
+                            None => { let _ = req.respond(err(404, "not_found", None)); }
+                            Some(f) if if_match.as_deref() != Some("*") && if_match != Some(f.version.to_string()) => { let _ = req.respond(err(409, "conflict", Some(row(&rp, &f)))); }
+                            Some(_) => { g.files.remove(&rp); g.trash.push(rp); let v = g.bump(); let _ = req.respond(j(200, serde_json::json!({"version": v}))); }
+                        }
+                    }
+                    ("POST", "/api/v1/files/move") => {
+                        let b: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let (from, to) = (b["from"].as_str().unwrap().to_string(), b["to"].as_str().unwrap().to_string());
+                        let want = b["if_match"].as_i64().map(|v| v.to_string()).or(if_match.clone());
+                        match g.files.get(&from).cloned() {
+                            None => { let _ = req.respond(err(404, "not_found", None)); }
+                            Some(f) if want != Some(f.version.to_string()) => { let _ = req.respond(err(409, "conflict", Some(row(&from, &f)))); }
+                            Some(_) if g.files.contains_key(&to) => { let _ = req.respond(err(409, "target_exists", None)); }
+                            Some(mut f) => { g.files.remove(&from); f.version = g.bump(); let v = f.version; g.files.insert(to, f); let _ = req.respond(j(200, serde_json::json!({"version": v}))); }
+                        }
+                    }
+                    _ => { let _ = req.respond(err(404, "not_found", None)); }
+                }
+            }
+        });
+        Mock { url, s }
+    }
+}
+
+#[cfg(test)]
+mod http_tests {
+    use super::*;
+
+    const FOLDER: &str = "Null Notes/Work";
+
+    struct Dev {
+        root: std::path::PathBuf,
+        st: SyncState,
+        drive: crate::backup::Drive,
+    }
+    impl Dev {
+        fn new(name: &str, url: &str) -> Dev {
+            let root = std::env::temp_dir().join(format!("nn-hsync-{}-{}-{}", std::process::id(), name, crate::backup::now_rfc3339().replace(':', "")));
+            fs::create_dir_all(&root).unwrap();
+            let mut drive = crate::backup::Drive::new(url, "tok").unwrap();
+            drive.backoff = vec![];
+            Dev { root, st: SyncState::default(), drive }
+        }
+        fn sync(&mut self) -> SyncReport {
+            let r = DriveRemote { drive: &self.drive, folder: FOLDER.into() };
+            let mut out = run_sync(&self.root, &r, &mut self.st, false).unwrap();
+            for _ in 0..3 {
+                if !out.retry { break; }
+                let more = run_sync(&self.root, &r, &mut self.st, false).unwrap();
+                out = SyncReport { conflicts: [out.conflicts, more.conflicts.clone()].concat(), ..more };
+            }
+            out
+        }
+        fn v(&self) -> Vault { Vault::open(self.root.clone()).unwrap() }
+        fn read(&self, p: &str) -> String { self.v().read_text(p).unwrap() }
+        fn files(&self) -> Vec<String> {
+            let mut v: Vec<String> = self.v().list_entries().unwrap().into_iter().filter(|e| !e.dir).map(|e| e.path).collect();
+            v.sort();
+            v
+        }
+    }
+    impl Drop for Dev {
+        fn drop(&mut self) { let _ = fs::remove_dir_all(&self.root); }
+    }
+    fn later() { std::thread::sleep(std::time::Duration::from_millis(15)); }
+
+    #[test]
+    fn over_http_two_devices_conflicts_renames_deletes() {
+        let m = httpmock::start("tok");
+        let (mut a, mut b) = (Dev::new("a", &m.url), Dev::new("b", &m.url));
+        a.v().write_text("Plan.md", "base").unwrap();
+        a.v().write_text("Inbox/todo.txt", "[ ] a").unwrap();
+        a.v().write_text("Trash me.md", "bye").unwrap();
+        fs::write(a.root.join("pic.png"), b"\x89PNG").unwrap();
+        a.sync();
+        b.sync();
+        assert_eq!(a.files(), b.files());
+        assert_eq!(noteid::load_ids(&a.root).get("Inbox/todo.txt"), noteid::load_ids(&b.root).get("Inbox/todo.txt"));
+        assert!(m.s.lock().unwrap().files.contains_key("Null Notes/Work/.nullnotes/ids.json"));
+
+        // offline on both: conflicting edits, a rename, a delete, an image rename
+        later();
+        a.v().write_text("Plan.md", "from A").unwrap();
+        b.v().write_text("Plan.md", "from B").unwrap();
+        fs::create_dir_all(b.root.join("Done")).unwrap();
+        fs::rename(b.root.join("Inbox/todo.txt"), b.root.join("Done/todo.txt")).unwrap(); // Explorer rename: id via content? txt id is in ids.json by path -> see below
+        crate::vault::Vault::open(b.root.clone()).unwrap(); // (no-op; Explorer has no hook)
+        fs::remove_file(a.root.join("Trash me.md")).unwrap();
+        fs::create_dir_all(a.root.join("img")).unwrap();
+        fs::rename(a.root.join("pic.png"), a.root.join("img/pic.png")).unwrap();
+
+        let ra = a.sync();
+        let rb = b.sync();
+        let ra2 = a.sync();
+        assert!(ra.conflicts.is_empty() && ra2.problems.is_empty(), "{ra:?} {ra2:?}");
+        assert_eq!(rb.conflicts.len(), 1, "{rb:?}");
+        assert_eq!(a.files(), b.files(), "both devices end the same");
+        let texts: Vec<String> = a.files().iter().filter(|p| p.ends_with(".md")).map(|p| a.read(p)).collect();
+        assert!(texts.contains(&"from A".into()) && texts.contains(&"from B".into()), "{texts:?}");
+        assert!(!a.files().contains(&"Trash me.md".to_string()) && !b.files().contains(&"Trash me.md".to_string()));
+        assert!(b.files().contains(&"img/pic.png".to_string()), "image move followed by content");
+        assert!(a.files().contains(&"Done/todo.txt".to_string()));
+        assert_eq!(noteid::load_ids(&a.root).get("Done/todo.txt"), noteid::load_ids(&b.root).get("Done/todo.txt"), "the txt kept its note id");
+        assert!(noteid::load_ids(&a.root).get("Done/todo.txt").is_some());
+        let g = m.s.lock().unwrap();
+        assert_eq!(g.trash, vec!["Null Notes/Work/Trash me.md".to_string()], "the renamed txt was moved, not deleted");
+        assert!(g.log.iter().any(|l| l.starts_with("POST /api/v1/files/move")), "moves used, not re-uploads");
+        assert!(!g.log.iter().any(|l| l.contains("428")));
+    }
+
+    #[test]
+    fn over_http_concurrent_write_is_never_overwritten() {
+        let m = httpmock::start("tok");
+        let (mut a, mut b) = (Dev::new("a", &m.url), Dev::new("b", &m.url));
+        a.v().write_text("n.md", "v1").unwrap();
+        a.sync();
+        b.sync();
+        later();
+        a.v().write_text("n.md", "A's edit").unwrap();
+        // just before A's first write, another device saves to Drive
+        m.s.lock().unwrap().hook = Some(Box::new(|g: &mut httpmock::S| {
+            let k = "Null Notes/Work/n.md".to_string();
+            let mut f = g.files[&k].clone();
+            let id = noteid::get_id(&String::from_utf8_lossy(&f.data)).unwrap();
+            f.data = noteid::with_id("C's edit", &id).into_bytes();
+            f.version = g.bump();
+            g.files.insert(k, f);
+        }));
+        let r = a.sync();
+        assert_eq!(r.conflicts.len(), 1, "{r:?}");
+        let texts: Vec<String> = a.files().iter().map(|p| a.read(p)).collect();
+        assert!(texts.contains(&"A's edit".into()) && texts.contains(&"C's edit".into()), "{texts:?}");
+        b.sync();
+        assert_eq!(a.files(), b.files());
     }
 }
