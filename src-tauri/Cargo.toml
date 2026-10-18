@@ -1,6 +1,6 @@
 [package]
 name = "null-notes"
-version = "0.3.1"
+version = "0.4.0"
 description = "Null Notes - a local markdown vault"
 authors = ["Luke"]
 edition = "2021"
@@ -22,6 +22,14 @@ chacha20poly1305 = "0.10"
 base64 = "0.22"
 trash = "5"
 zeroize = "1"
+# Phase 1: cross-product search
+rusqlite = { version = "0.32", features = ["bundled"] }
+notify = "6"
+notify-debouncer-mini = "0.4"
+tiny_http = "0.12"
+uuid = { version = "1", features = ["v4"] }
+time = { version = "0.3", features = ["formatting"] }
+filetime = "0.2"
 
 [profile.release]
 codegen-units = 1

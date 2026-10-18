@@ -405,3 +405,7 @@ textarea::selection{background:rgba(0,229,255,.25)}
 .wlogo .mark{width:56px;height:56px}
 .wlogo.small .mark{width:72px;height:72px}
 .wlogo .mk-sq{stroke-width:3}
+
+/* Null Search pairing (Settings) */
+.tokenfield { font-family: var(--mono, "IBM Plex Mono", monospace); font-size: 11px; letter-spacing: .02em; width: 100%; min-width: 0; }
+#agentSec .setrow input[type="text"] { flex: 1; }

@@ -40,7 +40,7 @@ export function onFileDrop(handler) {
 
 /* ---------------- browser demo vault ---------------- */
 
-const M = { open: false, dirs: new Set(), files: new Map(), staged: new Map(), meta: new Map() };
+const M = { open: false, dirs: new Set(), files: new Map(), staged: new Map(), meta: new Map(), agent: { token: "demo-token-not-real", origin: "" } };
 const KINDS = { md: "md", markdown: "md", txt: "txt", html: "html", htm: "html", canvas: "canvas", png: "img", jpg: "img", jpeg: "img" };
 const extOf = (p) => (p.match(/\.([^./]+)$/) || [, ""])[1].toLowerCase();
 const kindOf = (p) => (extOf(p) === "lock" ? (["md", "txt", "html", "canvas"].includes(KINDS[extOf(p.slice(0, -5))]) ? "locked" : null) : KINDS[extOf(p)] || null);
@@ -207,6 +207,9 @@ async function mock(cmd, a) {
       return importStaged(ids, clean(a.dest));
     }
     case "reveal_path": fail("The browser demo has no file manager to open.");
+    case "agent_info": return { ...M.agent, address: "http://127.0.0.1:47821", status: "Not running in the browser demo", indexed: false };
+    case "agent_set_origin": M.agent.origin = a.origin; return mock("agent_info", {});
+    case "agent_new_token": M.agent.token = [...crypto.getRandomValues(new Uint8Array(32))].map((b) => b.toString(16).padStart(2, "0")).join(""); return mock("agent_info", {});
     default: fail("Unknown command " + cmd);
   }
 }

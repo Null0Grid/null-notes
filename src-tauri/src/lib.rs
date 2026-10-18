@@ -1,13 +1,16 @@
 //! Null Notes backend. Command names and argument names match what the
 //! frontend (src/backend.js) invokes.
 
+mod agent;
+mod index;
 mod lock;
+mod noteid;
 mod vault;
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use vault::{Entry, ImportReport, Vault, R};
@@ -82,7 +85,9 @@ fn enter(app: &AppHandle, st: &State<AppState>, path: PathBuf) -> R<VaultInfo> {
     s.recent.truncate(RECENT_MAX);
     s.last = Some(i.path.clone());
     save_settings(app, &s);
+    let root = v.root.clone();
     *st.vault.lock().unwrap() = Some(v);
+    app.state::<Arc<agent::Search>>().set_vault(Some(root));
     Ok(i)
 }
 
@@ -128,6 +133,7 @@ async fn pick_vault(app: AppHandle, st: State<'_, AppState>) -> R<Option<VaultIn
 #[tauri::command]
 fn close_vault(app: AppHandle, st: State<AppState>) {
     *st.vault.lock().unwrap() = None;
+    app.state::<Arc<agent::Search>>().set_vault(None);
     let mut s = load_settings(&app);
     s.last = None;
     save_settings(&app, &s);
@@ -176,8 +182,12 @@ fn create_folder(st: State<AppState>, path: String) -> R<()> {
 }
 
 #[tauri::command]
-fn rename_path(st: State<AppState>, from: String, to: String) -> R<()> {
-    with(&st, |v| v.rename_path(&from, &to))
+fn rename_path(st: State<AppState>, search: State<Arc<agent::Search>>, from: String, to: String) -> R<()> {
+    with(&st, |v| v.rename_path(&from, &to))?;
+    if let (Ok(f), Ok(t)) = (vault::clean(&from), vault::clean(&to)) {
+        search.renamed(&f, &t);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -224,6 +234,23 @@ fn reveal_path(st: State<AppState>, path: String) -> R<()> {
     #[cfg(all(unix, not(target_os = "macos")))]
     let r = std::process::Command::new("xdg-open").arg(if abs.is_dir() { abs.clone() } else { abs.parent().unwrap().to_path_buf() }).spawn();
     r.map(|_| ()).map_err(|e| format!("Couldn't open the file manager: {e}"))
+}
+
+/* ---------------- search agent (Settings → Null Search) ---------------- */
+
+#[tauri::command]
+fn agent_info(search: State<Arc<agent::Search>>) -> agent::AgentInfo {
+    search.info()
+}
+
+#[tauri::command]
+fn agent_set_origin(search: State<Arc<agent::Search>>, origin: String) -> R<agent::AgentInfo> {
+    search.set_origin(&origin)
+}
+
+#[tauri::command]
+fn agent_new_token(search: State<Arc<agent::Search>>) -> agent::AgentInfo {
+    search.regenerate_token()
 }
 
 /* ---------------- per-vault meta ---------------- */
@@ -303,10 +330,16 @@ pub fn build(b: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
     b.plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .setup(|app| {
-            // Reopen the last vault, like the shipped app.
             let h = app.handle().clone();
+            let cfg_dir = h.path().app_config_dir()?;
+            let data_dir = h.path().app_local_data_dir()?;
+            let search = agent::Search::new(&cfg_dir, &data_dir);
+            search.serve();
+            app.manage(search.clone());
+            // Reopen the last vault, like the shipped app.
             if let Some(last) = load_settings(&h).last {
                 if let Ok(v) = Vault::open(PathBuf::from(last)) {
+                    search.set_vault(Some(v.root.clone()));
                     *app.state::<AppState>().vault.lock().unwrap() = Some(v);
                 }
             }
@@ -319,6 +352,7 @@ pub fn build(b: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
             read_meta, write_meta,
             lock_status, lock_setup, lock_unlock, lock_change, lock_lock,
             encrypt_path, decrypt_path, read_locked, write_locked, create_locked, read_all_locked,
+            agent_info, agent_set_origin, agent_new_token,
         ])
 }
 

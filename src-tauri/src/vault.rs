@@ -2,6 +2,7 @@
 //! be unit-tested and reused by the search agent later.
 
 use crate::lock::{self, Key, LockFile};
+use crate::noteid;
 use base64::{engine::general_purpose, Engine};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -64,7 +65,7 @@ pub fn kind_of(p: &str) -> Option<&'static str> {
     })
 }
 
-fn is_text(p: &str) -> bool {
+pub fn is_text(p: &str) -> bool {
     matches!(kind_of(p), Some(k) if TEXT_KINDS.contains(&k))
 }
 
@@ -192,7 +193,9 @@ impl Vault {
         for e in self.list_entries()? {
             if !e.dir && TEXT_KINDS.contains(&e.kind.as_str()) && e.size <= BULK_TEXT_MAX {
                 if let Ok(s) = fs::read(self.abs(&e.path)) {
-                    o.insert(e.path, String::from_utf8_lossy(&s).into_owned());
+                    let t = String::from_utf8_lossy(&s);
+                    let t = if noteid::is_md(&e.path) { noteid::strip_id(&t) } else { t.into_owned() };
+                    o.insert(e.path, t);
                 }
             }
         }
@@ -213,7 +216,8 @@ impl Vault {
             return Err(format!("{} is larger than 5 MB, which is too big to edit here.", file_name(&p)));
         }
         let b = fs::read(&abs).map_err(|e| format!("Couldn't read {}: {e}", file_name(&p)))?;
-        Ok(String::from_utf8_lossy(&b).into_owned())
+        let t = String::from_utf8_lossy(&b);
+        Ok(if noteid::is_md(&p) { noteid::strip_id(&t) } else { t.into_owned() })
     }
 
     pub fn read_image(&self, rel: &str) -> R<String> {
@@ -245,7 +249,17 @@ impl Vault {
         if let Some(d) = abs.parent() {
             fs::create_dir_all(d).map_err(|e| format!("Couldn't save {}: {e}", file_name(&p)))?;
         }
-        atomic_write(&abs, content.as_bytes())
+        if noteid::is_md(&p) {
+            // The editor never sees the id; keep the one on disk (or mint one).
+            let id = noteid::get_id(content)
+                .or_else(|| fs::read(&abs).ok().and_then(|b| noteid::get_id(&String::from_utf8_lossy(&b))))
+                .unwrap_or_else(noteid::new_id);
+            atomic_write(&abs, noteid::with_id(content, &id).as_bytes())
+        } else {
+            atomic_write(&abs, content.as_bytes())?;
+            noteid::sidecar_id(&self.root, &p);
+            Ok(())
+        }
     }
 
     pub fn create_file(&self, rel: &str, content: &str) -> R<()> {
@@ -317,10 +331,13 @@ impl Vault {
             // Windows treats Foo and foo as the same name, so go through a temp name.
             let mut tmp = fa.as_os_str().to_owned();
             tmp.push(".nnrename");
-            fs::rename(&fa, &tmp).and_then(|_| fs::rename(&tmp, &ta)).map_err(|e| format!("Couldn't rename {from}: {e}"))
+            fs::rename(&fa, &tmp).and_then(|_| fs::rename(&tmp, &ta)).map_err(|e| format!("Couldn't rename {from}: {e}"))?;
         } else {
-            fs::rename(&fa, &ta).map_err(|e| format!("Couldn't move {from}: {e}"))
+            fs::rename(&fa, &ta).map_err(|e| format!("Couldn't move {from}: {e}"))?;
         }
+        // .md ids travel inside the file; the others follow in ids.json.
+        noteid::sidecar_move(&self.root, &from, &to);
+        Ok(())
     }
 
     pub fn delete_path(&self, rel: &str, permanent: bool) -> R<()> {
@@ -333,9 +350,12 @@ impl Vault {
             return Ok(());
         }
         if !permanent {
-            return trash::delete(&abs).map_err(|e| format!("Couldn't move {p} to the Recycle Bin: {e}"));
+            trash::delete(&abs).map_err(|e| format!("Couldn't move {p} to the Recycle Bin: {e}"))?;
+        } else {
+            if abs.is_dir() { fs::remove_dir_all(&abs) } else { fs::remove_file(&abs) }.map_err(|e| format!("Couldn't delete {p}: {e}"))?;
         }
-        if abs.is_dir() { fs::remove_dir_all(&abs) } else { fs::remove_file(&abs) }.map_err(|e| format!("Couldn't delete {p}: {e}"))
+        noteid::sidecar_remove(&self.root, &p);
+        Ok(())
     }
 
     /* ---------- import ---------- */
@@ -380,7 +400,14 @@ impl Vault {
             let _ = fs::create_dir_all(d);
         }
         match fs::copy(src, &abs) {
-            Ok(_) => rep.added.push(target),
+            Ok(_) => {
+                if noteid::is_md(&target) {
+                    noteid::ensure_md_id(&abs);
+                } else if is_text(&target) {
+                    noteid::sidecar_id(&self.root, &target);
+                }
+                rep.added.push(target)
+            }
             Err(_) => rep.skipped.push(name.to_string()),
         }
     }
@@ -502,6 +529,7 @@ impl Vault {
         let plain = fs::read(self.abs(&p)).map_err(|e| format!("Couldn't read {}: {e}", file_name(&p)))?;
         atomic_write(&self.abs(&np), &lock::encrypt_file(key, &plain)?)?;
         fs::remove_file(self.abs(&p)).map_err(|e| format!("Locked copy saved, but the original couldn't be removed: {e}"))?;
+        noteid::sidecar_move(&self.root, &p, &np);
         Ok(np)
     }
 
@@ -518,6 +546,7 @@ impl Vault {
         let data = fs::read(self.abs(&p)).map_err(|e| format!("Couldn't read {}: {e}", file_name(&p)))?;
         atomic_write(&self.abs(&np), &lock::decrypt_file(key, &data, file_name(&p))?)?;
         fs::remove_file(self.abs(&p)).map_err(|e| format!("Unlocked copy saved, but the locked file couldn't be removed: {e}"))?;
+        noteid::sidecar_move(&self.root, &p, &np);
         Ok(np)
     }
 
@@ -529,7 +558,8 @@ impl Vault {
         }
         let data = fs::read(self.abs(&p)).map_err(|_| "That file doesn't exist anymore.".to_string())?;
         let plain = lock::decrypt_file(key, &data, file_name(&p))?;
-        Ok(String::from_utf8_lossy(&plain).into_owned())
+        let t = String::from_utf8_lossy(&plain);
+        Ok(if noteid::is_md(&p[..p.len() - 5]) { noteid::strip_id(&t) } else { t.into_owned() })
     }
 
     pub fn write_locked(&self, rel: &str, content: &str) -> R<()> {
@@ -542,6 +572,18 @@ impl Vault {
         if let Some(d) = abs.parent() {
             fs::create_dir_all(d).map_err(|e| format!("Couldn't save {}: {e}", file_name(&p)))?;
         }
+        let content = if noteid::is_md(&p[..p.len() - 5]) {
+            let id = noteid::get_id(content)
+                .or_else(|| {
+                    let d = fs::read(&abs).ok()?;
+                    let pl = lock::decrypt_file(key, &d, file_name(&p)).ok()?;
+                    noteid::get_id(&String::from_utf8_lossy(&pl))
+                })
+                .unwrap_or_else(noteid::new_id);
+            noteid::with_id(content, &id)
+        } else {
+            content.to_string()
+        };
         atomic_write(&abs, &lock::encrypt_file(key, content.as_bytes())?)
     }
 
@@ -560,7 +602,9 @@ impl Vault {
             if e.kind == "locked" {
                 if let Ok(d) = fs::read(self.abs(&e.path)) {
                     if let Ok(pl) = lock::decrypt_file(key, &d, &e.name) {
-                        o.insert(e.path, String::from_utf8_lossy(&pl).into_owned());
+                        let t = String::from_utf8_lossy(&pl);
+                        let t = if noteid::is_md(&e.path[..e.path.len() - 5]) { noteid::strip_id(&t) } else { t.into_owned() };
+                        o.insert(e.path, t);
                     }
                 }
             }

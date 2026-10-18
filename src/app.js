@@ -1096,6 +1096,7 @@ function armAutoLock() {
 /* ---------------- settings dialog ---------------- */
 async function openSettings() {
   const st = JSON.parse(JSON.stringify(S.settings));
+  const ag = await api("agent_info").catch(() => null);
   const tog = (id, label, on) => `<label class="gtog"><span>${label}</span><input type="checkbox" id="${id}" ${on ? "checked" : ""}><i></i></label>`;
   const formats = ["YYYY-MM-DD", "YYYY-MM-DD dddd", "DD-MM-YYYY", "MM-DD-YYYY", "YYYY/MM/YYYY-MM-DD"];
   const result = await modal(
@@ -1127,10 +1128,30 @@ async function openSettings() {
          ${S.lock.configured ? '<div class="row2" style="justify-content:flex-start"><button type="button" class="btn" id="sChangePass">Change passphrase</button></div>' : ""}
        </div>
      </div>
+     ${ag ? `<div class="setsec" id="agentSec">
+       <h3>Null Search <span class="badge k-md">PAIRING</span></h3>
+       <div class="setnote">Null Search can find notes in this vault through a small search service that only listens on this computer (${esc(ag.address)}). Paste the pairing token into Null Search to connect it.</div>
+       <div class="setrow"><span>Pairing token</span><input type="text" id="sToken" class="tokenfield" readonly value="${esc(ag.token)}" spellcheck="false"></div>
+       <div class="row2" style="justify-content:flex-start"><button type="button" class="btn" id="sCopyToken">Copy token</button><button type="button" class="btn" id="sNewToken">New token</button></div>
+       <div class="setrow"><span>Null Search address</span><input type="text" id="sOrigin" value="${esc(ag.origin)}" placeholder="http://search.lan" spellcheck="false"></div>
+       <div class="setnote">Only this address can query your notes from a browser. Leave it empty to block all browser access.</div>
+       <div class="setnote ${/^Listening/.test(ag.status) ? "" : "warn"}" id="sAgentStatus">${esc(ag.status)}</div>
+     </div>` : ""}
      <div class="row2"><button type="button" class="btn" data-cancel>Cancel</button><button type="submit" class="btn">Save</button></div>`,
     (form, done) => {
       form.querySelector("#sDaily").onchange = (e) => (form.querySelector("#dailySub").hidden = !e.target.checked);
       form.querySelector("#sLock").onchange = (e) => (form.querySelector("#lockSub").hidden = !e.target.checked);
+      if (ag) {
+        const tok = form.querySelector("#sToken");
+        form.querySelector("#sCopyToken").onclick = async () => {
+          try { await navigator.clipboard.writeText(tok.value); } catch { tok.select(); document.execCommand("copy"); }
+          toast("Pairing token copied");
+        };
+        form.querySelector("#sNewToken").onclick = async () => {
+          if (!confirm("Make a new pairing token? Null Search stops working until you paste the new one in.")) return;
+          try { tok.value = (await api("agent_new_token")).token; toast("New pairing token made"); } catch (e) { toast(errText(e), true); }
+        };
+      }
       const cp = form.querySelector("#sChangePass");
       if (cp) cp.onclick = () => { done("changepass"); };
       form.onsubmit = (e) => {
@@ -1146,12 +1167,21 @@ async function openSettings() {
         st.daily.clock = v("sDClock").value;
         st.lock.enabled = v("sLock").checked;
         st.lock.autoLockMin = +v("sLockMin").value;
+        if (ag) st.__origin = v("sOrigin").value.trim();
         done(st);
       };
     }, true
   );
   if (result === "changepass") return changePassphrase();
   if (!result) return;
+  if ("__origin" in result) {
+    const origin = result.__origin;
+    delete result.__origin;
+    if (ag && origin !== ag.origin) {
+      try { await api("agent_set_origin", { origin }); }
+      catch (e) { toast(errText(e), true); return; }
+    }
+  }
   S.settings = result;
   await saveSettings();
   applyAddons();
