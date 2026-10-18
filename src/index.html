@@ -1,0 +1,153 @@
+<!DOCTYPE html><html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Null Notes</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- No vault open yet -->
+<main class="welcome" id="welcome" hidden="">
+  <div class="wbox">
+    <div class="wlogo"><svg class="mark" viewBox="0 0 100 100" aria-hidden="true"><rect x="6" y="8" width="64" height="64" rx="2.5" class="mk-sq"></rect><rect x="24" y="24" width="70" height="70" rx="2.5" class="mk-sq mk-front"></rect><g class="mk-sl"><polygon points="51.6,31 58.8,31 47.9,89 40.7,89"></polygon><polygon points="70.1,31 77.3,31 66.4,89 59.2,89"></polygon></g></svg>NULL NOTES</div>
+    <p class="wlead">Your notes live in a folder on this computer. Pick an existing folder to open it as a vault, or an empty one to start a new vault.</p>
+    <div class="wacts">
+      <button class="btn big" id="wOpen">Open folder as vault</button>
+    </div>
+    <div class="wrecent" id="wRecentBox" hidden="">
+      <div class="label">Recent vaults</div>
+      <ul id="wRecent"></ul>
+    </div>
+    <p class="wfoot">Nothing leaves your computer. No account, no sync, no network.</p>
+  </div>
+</main>
+
+<div class="app" id="app" hidden="">
+  <header class="top">
+    <div class="logo"><svg class="mark" viewBox="0 0 100 100" aria-hidden="true"><rect x="6" y="8" width="64" height="64" rx="2.5" class="mk-sq"></rect><rect x="24" y="24" width="70" height="70" rx="2.5" class="mk-sq mk-front"></rect><g class="mk-sl"><polygon points="51.6,31 58.8,31 47.9,89 40.7,89"></polygon><polygon points="70.1,31 77.3,31 66.4,89 59.2,89"></polygon></g></svg>NULL NOTES</div>
+    <div class="search">
+      <input id="q" type="search" placeholder="Search files, #tags, [[links]]   Ctrl+K" autocomplete="off" aria-label="Search files">
+      <div class="results" id="results" hidden=""></div>
+    </div>
+    <div class="seg" role="group" aria-label="View mode">
+      <button id="mEdit" aria-pressed="false" title="Editor only">Edit</button>
+      <button id="mSplit" aria-pressed="true" title="Editor and preview">Split</button>
+      <button id="mRead" aria-pressed="false" title="Preview only (Ctrl+E)">Read</button>
+    </div>
+    <button class="btn" id="graphBtn">Graph</button>
+  </header>
+
+  <div class="main">
+    <aside class="left" id="left">
+      <div class="vaultbar">
+        <button class="vaultname" id="vaultBtn" title="Vault options"><span id="vaultName">Vault</span><span class="chev">▾</span></button>
+        <button class="iconbtn" id="settingsBtn" title="Settings and add-ons" aria-label="Settings">⚙</button>
+      </div>
+      <div class="stabs" role="tablist">
+        <button role="tab" id="tabFiles" aria-selected="true">Files</button>
+        <button role="tab" id="tabSearch" aria-selected="false" title="Search all notes (Ctrl+Shift+F)">Search</button>
+      </div>
+      <div id="filesPane" class="spane">
+        <div class="treeacts">
+          <button class="mini" id="newNoteBtn" title="New note (Ctrl+N)">+ Note</button>
+          <button class="mini" id="newFolderBtn" title="New folder (Ctrl+Shift+N)">+ Folder</button>
+          <button class="mini" id="importBtn" title="Import files">Import</button>
+          <button class="mini" id="todayBtn" title="Today's note (Ctrl+D)" hidden="">Today</button>
+          <button class="mini icon" id="collapseBtn" title="Collapse all folders" aria-label="Collapse all folders">⇤</button>
+        </div>
+        <div class="treewrap" id="treeWrap" tabindex="0" aria-label="Vault files">
+          <ul class="tree" id="tree" role="tree"></ul>
+        </div>
+      </div>
+      <div id="searchPane" class="spane" hidden="">
+        <div class="fsearch">
+          <input type="search" id="fq" placeholder="Search every note…" autocomplete="off" spellcheck="false" aria-label="Search every note">
+          <div class="fopts">
+            <label><input type="checkbox" id="fCase"> Match case</label>
+            <label><input type="checkbox" id="fWord"> Whole word</label>
+          </div>
+          <div class="fsum" id="fSum"></div>
+        </div>
+        <div class="fresults" id="fResults"></div>
+      </div>
+      <div class="label">Tags</div>
+      <div class="tags" id="tags"></div>
+    </aside>
+
+    <section class="center">
+      <div class="notebar">
+        <div class="path" id="path"></div>
+        <span class="saved" id="saved"></span>
+        <button class="btn" id="renameBtn" title="Rename (F2)">Rename</button>
+        <button class="btn pink" id="delBtn" title="Move to Recycle Bin">Delete</button>
+      </div>
+      <div class="panes split" id="panes">
+        <div class="editor"><textarea id="ed" spellcheck="false" aria-label="File source"></textarea></div>
+        <div class="preview" id="preview"><article class="doc" id="doc"></article><div id="alt" hidden=""></div></div>
+      </div>
+      <div class="canvashost" id="canvasHost" hidden=""></div>
+      <div class="lockedpane" id="lockedPane" hidden="">
+        <div class="lockicon">⬢</div>
+        <h2 id="lockedTitle">This note is locked</h2>
+        <p>Its contents are encrypted on disk. Unlock the vault to read and edit it.</p>
+        <button class="btn big" id="lockedUnlock">Unlock vault</button>
+      </div>
+      <div class="blank" id="blank" hidden="">
+        <div class="wlogo small"><svg class="mark" viewBox="0 0 100 100" aria-hidden="true"><rect x="6" y="8" width="64" height="64" rx="2.5" class="mk-sq"></rect><rect x="24" y="24" width="70" height="70" rx="2.5" class="mk-sq mk-front"></rect><g class="mk-sl"><polygon points="51.6,31 58.8,31 47.9,89 40.7,89"></polygon><polygon points="70.1,31 77.3,31 66.4,89 59.2,89"></polygon></g></svg></div>
+        <p>No file open. Pick one on the left, or</p>
+        <div class="wacts"><button class="btn" id="blankNew">New note</button><button class="btn" id="blankImport">Import files</button></div>
+      </div>
+    </section>
+
+    <aside class="right" id="right">
+      <div class="label">Backlinks</div>
+      <ul class="links" id="back"></ul>
+      <div id="outBox">
+        <div class="label">Outgoing</div>
+        <ul class="links" id="out"></ul>
+        <div class="label">Outline</div>
+        <ul class="outline" id="outline"></ul>
+      </div>
+      <div class="label">File</div>
+      <div class="stats" id="stats"></div>
+    </aside>
+  </div>
+
+  <footer class="status">
+    <span><span class="dot"></span>LOCAL · NO NETWORK</span>
+    <span id="count"></span>
+    <button class="lockbtn" id="lockBtn" hidden=""></button>
+    <span class="r" id="vaultPath"></span>
+  </footer>
+</div>
+
+<!-- overlays -->
+<div class="ctx" id="ctx" hidden="" role="menu"></div>
+<div class="modal" id="modal" hidden=""></div>
+<div class="drop" id="drop" hidden=""><div><span id="dropText">DROP TO IMPORT</span><small>.md .txt .html .png .jpg and folders</small></div></div>
+<div class="toast" id="toast" hidden="" role="status"></div>
+<div class="lightbox" id="lightbox" hidden=""><img id="lbImg" alt=""></div>
+<div class="ghost" id="ghost" hidden=""></div>
+<div class="graph" id="graph" hidden="">
+  <header>
+    <div class="ghead"><span>GRAPH</span><small>Drag notes to move them · Shift+click to pin · Scroll to zoom · Right-click for more</small></div>
+    <div class="gtools">
+      <button class="btn" id="fitGraph">Fit</button>
+      <button class="btn" id="panelBtn" aria-expanded="true" aria-controls="gpanel">Settings</button>
+      <button class="btn" id="closeGraph">Close</button>
+    </div>
+  </header>
+  <div class="gbody">
+    <canvas id="cv"></canvas>
+    <aside class="gpanel" id="gpanel" aria-label="Graph settings"></aside>
+  </div>
+</div>
+
+<script src="vendor/d3-dispatch.min.js"></script>
+<script src="vendor/d3-quadtree.min.js"></script>
+<script src="vendor/d3-timer.min.js"></script>
+<script src="vendor/d3-force.min.js"></script>
+<script type="module" src="app.js"></script>
+
+
+</body></html>

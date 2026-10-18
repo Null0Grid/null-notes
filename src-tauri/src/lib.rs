@@ -1,0 +1,330 @@
+//! Null Notes backend. Command names and argument names match what the
+//! frontend (src/backend.js) invokes.
+
+mod lock;
+mod vault;
+
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::Mutex;
+use tauri::{AppHandle, Manager, State};
+use tauri_plugin_dialog::DialogExt;
+use vault::{Entry, ImportReport, Vault, R};
+
+const RECENT_MAX: usize = 10;
+
+#[derive(Serialize)]
+struct VaultInfo {
+    path: String,
+    name: String,
+}
+
+#[derive(Serialize)]
+struct LockStatus {
+    configured: bool,
+    unlocked: bool,
+}
+
+/// App-level settings in the OS config dir (%APPDATA%\dev.nullgrid.notes\settings.json).
+#[derive(Serialize, Deserialize, Default)]
+struct Settings {
+    last: Option<String>,
+    #[serde(default)]
+    recent: Vec<String>,
+}
+
+#[derive(Default)]
+struct AppState {
+    vault: Mutex<Option<Vault>>,
+}
+
+fn settings_path(app: &AppHandle) -> Option<PathBuf> {
+    app.path().app_config_dir().ok().map(|d| d.join("settings.json"))
+}
+
+fn load_settings(app: &AppHandle) -> Settings {
+    settings_path(app)
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn save_settings(app: &AppHandle, s: &Settings) {
+    if let Some(p) = settings_path(app) {
+        if let Some(d) = p.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        let _ = vault::atomic_write(&p, serde_json::to_string_pretty(s).unwrap().as_bytes());
+    }
+}
+
+fn info(v: &Vault) -> VaultInfo {
+    VaultInfo { path: v.root.display().to_string(), name: v.name() }
+}
+
+fn with<T>(st: &State<AppState>, f: impl FnOnce(&Vault) -> R<T>) -> R<T> {
+    let g = st.vault.lock().unwrap();
+    f(g.as_ref().ok_or("No vault is open.")?)
+}
+
+fn with_mut<T>(st: &State<AppState>, f: impl FnOnce(&mut Vault) -> R<T>) -> R<T> {
+    let mut g = st.vault.lock().unwrap();
+    f(g.as_mut().ok_or("No vault is open.")?)
+}
+
+fn enter(app: &AppHandle, st: &State<AppState>, path: PathBuf) -> R<VaultInfo> {
+    let v = Vault::open(path)?;
+    let i = info(&v);
+    let mut s = load_settings(app);
+    s.recent.retain(|p| !p.eq_ignore_ascii_case(&i.path));
+    s.recent.insert(0, i.path.clone());
+    s.recent.truncate(RECENT_MAX);
+    s.last = Some(i.path.clone());
+    save_settings(app, &s);
+    *st.vault.lock().unwrap() = Some(v);
+    Ok(i)
+}
+
+/* ---------------- vaults ---------------- */
+
+#[tauri::command]
+fn vault_info(st: State<AppState>) -> Option<VaultInfo> {
+    st.vault.lock().unwrap().as_ref().map(info)
+}
+
+#[tauri::command]
+fn recent_vaults(app: AppHandle) -> Vec<VaultInfo> {
+    load_settings(&app)
+        .recent
+        .into_iter()
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir())
+        .map(|p| VaultInfo {
+            name: p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+            path: p.display().to_string(),
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn open_vault(app: AppHandle, st: State<AppState>, path: String) -> R<VaultInfo> {
+    enter(&app, &st, PathBuf::from(path))
+}
+
+#[tauri::command]
+async fn pick_vault(app: AppHandle, st: State<'_, AppState>) -> R<Option<VaultInfo>> {
+    let picked = app
+        .dialog()
+        .file()
+        .set_title("Choose a folder for your vault (an empty folder starts a new one)")
+        .blocking_pick_folder();
+    match picked.and_then(|f| f.into_path().ok()) {
+        Some(p) => enter(&app, &st, p).map(Some),
+        None => Ok(None),
+    }
+}
+
+#[tauri::command]
+fn close_vault(app: AppHandle, st: State<AppState>) {
+    *st.vault.lock().unwrap() = None;
+    let mut s = load_settings(&app);
+    s.last = None;
+    save_settings(&app, &s);
+}
+
+/* ---------------- files ---------------- */
+
+#[tauri::command]
+fn list_entries(st: State<AppState>) -> R<Vec<Entry>> {
+    with(&st, |v| v.list_entries())
+}
+
+#[tauri::command]
+fn read_all_text(st: State<AppState>) -> R<BTreeMap<String, String>> {
+    with(&st, |v| v.read_all_text())
+}
+
+#[tauri::command]
+fn read_text(st: State<AppState>, path: String) -> R<String> {
+    with(&st, |v| v.read_text(&path))
+}
+
+#[tauri::command]
+fn read_image(st: State<AppState>, path: String) -> R<String> {
+    with(&st, |v| v.read_image(&path))
+}
+
+#[tauri::command]
+fn write_text(st: State<AppState>, path: String, content: String) -> R<()> {
+    with(&st, |v| v.write_text(&path, &content))
+}
+
+#[tauri::command]
+fn write_image(st: State<AppState>, path: String, data: String) -> R<()> {
+    with(&st, |v| v.write_image(&path, &data))
+}
+
+#[tauri::command]
+fn create_file(st: State<AppState>, path: String, content: String) -> R<()> {
+    with(&st, |v| v.create_file(&path, &content))
+}
+
+#[tauri::command]
+fn create_folder(st: State<AppState>, path: String) -> R<()> {
+    with(&st, |v| v.create_folder(&path))
+}
+
+#[tauri::command]
+fn rename_path(st: State<AppState>, from: String, to: String) -> R<()> {
+    with(&st, |v| v.rename_path(&from, &to))
+}
+
+#[tauri::command]
+fn delete_path(st: State<AppState>, path: String, permanent: Option<bool>) -> R<()> {
+    with(&st, |v| v.delete_path(&path, permanent.unwrap_or(false)))
+}
+
+#[tauri::command]
+fn import_paths(st: State<AppState>, paths: Vec<String>, dest: String) -> R<ImportReport> {
+    with(&st, |v| v.import_paths(&paths, &dest))
+}
+
+#[tauri::command]
+async fn pick_import(app: AppHandle, st: State<'_, AppState>, dest: String, folders: Option<bool>) -> R<Option<ImportReport>> {
+    let d = app.dialog().file();
+    let picked: Option<Vec<PathBuf>> = if folders.unwrap_or(false) {
+        d.set_title("Import folders into the vault")
+            .blocking_pick_folders()
+            .map(|v| v.into_iter().filter_map(|f| f.into_path().ok()).collect())
+    } else {
+        d.set_title("Import files into the vault")
+            .add_filter("Notes, pages and images", &["md", "markdown", "txt", "html", "htm", "canvas", "png", "jpg", "jpeg"])
+            .blocking_pick_files()
+            .map(|v| v.into_iter().filter_map(|f| f.into_path().ok()).collect())
+    };
+    let Some(paths) = picked.filter(|p| !p.is_empty()) else { return Ok(None) };
+    let paths: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+    with(&st, |v| v.import_paths(&paths, &dest)).map(Some)
+}
+
+#[tauri::command]
+fn reveal_path(st: State<AppState>, path: String) -> R<()> {
+    let abs = with(&st, |v| Ok(v.abs(&vault::clean(&path)?)))?;
+    #[cfg(windows)]
+    let r = if path.is_empty() {
+        std::process::Command::new("explorer").arg(&abs).spawn()
+    } else {
+        let mut arg = std::ffi::OsString::from("/select,");
+        arg.push(&abs);
+        std::process::Command::new("explorer").arg(arg).spawn()
+    };
+    #[cfg(target_os = "macos")]
+    let r = std::process::Command::new("open").arg("-R").arg(&abs).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let r = std::process::Command::new("xdg-open").arg(if abs.is_dir() { abs.clone() } else { abs.parent().unwrap().to_path_buf() }).spawn();
+    r.map(|_| ()).map_err(|e| format!("Couldn't open the file manager: {e}"))
+}
+
+/* ---------------- per-vault meta ---------------- */
+
+#[tauri::command]
+fn read_meta(st: State<AppState>, name: String) -> R<Option<String>> {
+    with(&st, |v| v.read_meta(&name))
+}
+
+#[tauri::command]
+fn write_meta(st: State<AppState>, name: String, content: String) -> R<()> {
+    with(&st, |v| v.write_meta(&name, &content))
+}
+
+/* ---------------- lock ---------------- */
+
+#[tauri::command]
+fn lock_status(st: State<AppState>) -> R<LockStatus> {
+    with(&st, |v| Ok(LockStatus { configured: v.lock_configured(), unlocked: v.key.is_some() }))
+}
+
+// Argon2id with 64 MiB takes a moment, so these run off the main thread.
+#[tauri::command]
+async fn lock_setup(st: State<'_, AppState>, passphrase: String) -> R<()> {
+    with_mut(&st, |v| v.lock_setup(&passphrase))
+}
+
+#[tauri::command]
+async fn lock_unlock(st: State<'_, AppState>, passphrase: String) -> R<()> {
+    with_mut(&st, |v| v.lock_unlock(&passphrase))
+}
+
+#[tauri::command]
+async fn lock_change(st: State<'_, AppState>, old: String, r#new: String) -> R<()> {
+    with_mut(&st, |v| v.lock_change(&old, &r#new))
+}
+
+#[tauri::command]
+fn lock_lock(st: State<AppState>) -> R<()> {
+    with_mut(&st, |v| {
+        v.key = None;
+        Ok(())
+    })
+}
+
+#[tauri::command]
+fn encrypt_path(st: State<AppState>, path: String) -> R<String> {
+    with(&st, |v| v.encrypt_path(&path))
+}
+
+#[tauri::command]
+fn decrypt_path(st: State<AppState>, path: String) -> R<String> {
+    with(&st, |v| v.decrypt_path(&path))
+}
+
+#[tauri::command]
+fn read_locked(st: State<AppState>, path: String) -> R<String> {
+    with(&st, |v| v.read_locked(&path))
+}
+
+#[tauri::command]
+fn write_locked(st: State<AppState>, path: String, content: String) -> R<()> {
+    with(&st, |v| v.write_locked(&path, &content))
+}
+
+#[tauri::command]
+fn create_locked(st: State<AppState>, path: String, content: String) -> R<()> {
+    with(&st, |v| v.create_locked(&path, &content))
+}
+
+#[tauri::command]
+fn read_all_locked(st: State<AppState>) -> R<BTreeMap<String, String>> {
+    with(&st, |v| v.read_all_locked())
+}
+
+pub fn build(b: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
+    b.plugin(tauri_plugin_dialog::init())
+        .manage(AppState::default())
+        .setup(|app| {
+            // Reopen the last vault, like the shipped app.
+            let h = app.handle().clone();
+            if let Some(last) = load_settings(&h).last {
+                if let Ok(v) = Vault::open(PathBuf::from(last)) {
+                    *app.state::<AppState>().vault.lock().unwrap() = Some(v);
+                }
+            }
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            vault_info, recent_vaults, open_vault, pick_vault, close_vault,
+            list_entries, read_all_text, read_text, read_image, write_text, write_image,
+            create_file, create_folder, rename_path, delete_path, import_paths, pick_import, reveal_path,
+            read_meta, write_meta,
+            lock_status, lock_setup, lock_unlock, lock_change, lock_lock,
+            encrypt_path, decrypt_path, read_locked, write_locked, create_locked, read_all_locked,
+        ])
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    build(tauri::Builder::default())
+        .run(tauri::generate_context!())
+        .expect("error while running Null Notes");
+}
