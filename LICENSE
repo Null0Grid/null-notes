@@ -1,0 +1,9 @@
+Copyright (c) 2026 NULLGRID. All rights reserved.
+
+This source code is made available for viewing and reference. No license is
+granted to copy, modify, distribute or use it, except as the copyright holder
+allows in writing.
+
+Third-party components keep their own licenses, which are included where they
+are used: the IBM Plex and Silkscreen fonts (SIL Open Font License, src/fonts/),
+D3 and Mermaid (src/vendor/), and the Rust crates listed in src-tauri/Cargo.lock.

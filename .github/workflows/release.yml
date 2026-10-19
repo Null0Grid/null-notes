@@ -1,0 +1,106 @@
+name: Release
+
+# Push a tag that matches the app version (src-tauri/tauri.conf.json), e.g.
+#   git tag v5.0.1 && git push origin v5.0.1
+# Builds the .deb, the Windows installers and the Microsoft Store package,
+# then drafts a GitHub release. The .msix is a workflow artifact only: it's
+# unsigned and meant for Partner Center, which signs it.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    name: Check tag matches the app version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          app=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$app" != "$tag" ]; then echo "::error::tag $GITHUB_REF_NAME but tauri.conf.json says $app"; exit 1; fi
+          echo "version=$app" >> "$GITHUB_OUTPUT"
+
+  deb:
+    name: Debian / Ubuntu package
+    needs: version
+    runs-on: ubuntu-24.04   # the .deb needs glibc 2.39+: build on the oldest distro you support
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libssl-dev build-essential
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Test
+        working-directory: src-tauri
+        run: cargo test --lib
+      - name: Build .deb
+        run: packaging/deb/build-deb.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb
+          path: packaging/deb/*.deb
+
+  windows:
+    name: Windows installers + Store package
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+      - name: Test
+        working-directory: src-tauri
+        run: cargo test --lib
+      - name: Build installers (NSIS + MSI)
+        working-directory: src-tauri
+        run: cargo tauri build
+      - name: Build Store package (MSIX)
+        shell: pwsh
+        run: ./packaging/msix/build-msix.ps1 -SkipBuild
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: store-package
+          path: packaging/msix/*.msix
+
+  release:
+    name: Draft GitHub release
+    needs: [version, deb, windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          name: Null Notes ${{ needs.version.outputs.version }}
+          files: |
+            dist/deb/*.deb
+            dist/windows/nsis/*.exe
+            dist/windows/msi/*.msi
+          body: |
+            **Windows:** the `-setup.exe` installer (or the Microsoft Store).
+            **Ubuntu 24.04+ / Debian 13+:** `sudo apt install ./null-notes_${{ needs.version.outputs.version }}_amd64.deb`
+
+            The Microsoft Store package is in this run's `store-package` artifact (upload it in Partner Center).

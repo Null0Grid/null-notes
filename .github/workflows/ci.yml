@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test-linux:
+    name: Tests (Linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: System libraries (WebKitGTK)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libssl-dev build-essential
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Backend tests
+        working-directory: src-tauri
+        run: cargo test --lib
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Drive encryption vectors (Null Drive's reference client)
+        run: |
+          pip install pynacl
+          python3 tools/e2ee-reference/nulldrive_e2ee.py vectors
+      - name: Frontend syntax
+        run: |
+          # the frontend is ES modules: check each one as .mjs
+          for f in src/*.js; do cp "$f" "$RUNNER_TEMP/check.mjs"; node --check "$RUNNER_TEMP/check.mjs" || { echo "::error file=$f::syntax error"; exit 1; }; done
+
+  test-windows:
+    name: Tests (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Backend tests
+        working-directory: src-tauri
+        run: cargo test --lib
