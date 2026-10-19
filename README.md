@@ -67,7 +67,7 @@ cargo tauri build                     # Windows: NSIS + MSI installers
   - on Windows, `packaging/msix/build-msix.ps1`;
   - or cross-built from Linux, `packaging/msix/build-msix-linux.sh`.
 
-Pushing a tag like `v5.0.1` runs [the release workflow](.github/workflows/release.yml), which builds all of them and drafts a GitHub release.
+Pushing a tag like `5.0.1` or `v5.0.1` runs [the release workflow](.github/workflows/release.yml), which builds all of them and attaches them to the GitHub release. For a tag that already exists: Actions → Release → Run workflow.
 
 **Try sync without a Drive server:**
 - **Plain account:** `python3 tools/mock_drive.py 8765 mytoken`

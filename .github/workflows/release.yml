@@ -1,14 +1,25 @@
 name: Release
 
-# Push a tag that matches the app version (src-tauri/tauri.conf.json), e.g.
-#   git tag v5.0.1 && git push origin v5.0.1
-# Builds the .deb, the Windows installers and the Microsoft Store package,
-# then drafts a GitHub release. The .msix is a workflow artifact only: it's
-# unsigned and meant for Partner Center, which signs it.
+# Push a tag that matches the app version (src-tauri/tauri.conf.json), with
+# or without a "v": v5.0.1 or 5.0.1. Or, for a tag that already exists:
+# Actions → Release → Run workflow, and type the tag.
+# Builds the .deb, the Windows installers and the Microsoft Store package and
+# attaches them to the release for that tag (an existing release keeps its
+# published/draft state; a new one is published).
+# The .msix is a workflow artifact only: it's unsigned and meant for Partner
+# Center, which signs it.
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["v*", "[0-9]*.[0-9]*.[0-9]*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and attach to its release (e.g. 5.0.0)"
+        required: true
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
 
 permissions:
   contents: write
@@ -21,11 +32,13 @@ jobs:
       version: ${{ steps.v.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
       - id: v
         run: |
           app=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
-          tag="${GITHUB_REF_NAME#v}"
-          if [ "$app" != "$tag" ]; then echo "::error::tag $GITHUB_REF_NAME but tauri.conf.json says $app"; exit 1; fi
+          tag="${TAG#v}"
+          if [ "$app" != "$tag" ]; then echo "::error::tag $TAG but tauri.conf.json says $app"; exit 1; fi
           echo "version=$app" >> "$GITHUB_OUTPUT"
 
   deb:
@@ -34,6 +47,8 @@ jobs:
     runs-on: ubuntu-24.04   # the .deb needs glibc 2.39+: build on the oldest distro you support
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
       - run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libssl-dev build-essential
@@ -57,6 +72,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -84,7 +101,7 @@ jobs:
           path: packaging/msix/*.msix
 
   release:
-    name: Draft GitHub release
+    name: Attach to the GitHub release
     needs: [version, deb, windows]
     runs-on: ubuntu-24.04
     steps:
@@ -93,7 +110,8 @@ jobs:
           path: dist
       - uses: softprops/action-gh-release@v2
         with:
-          draft: true
+          tag_name: ${{ env.TAG }}
+          append_body: true
           name: Null Notes ${{ needs.version.outputs.version }}
           files: |
             dist/deb/*.deb
