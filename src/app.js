@@ -1165,7 +1165,7 @@ async function openSettings() {
          <div class="setnote" id="sBkModeNote"></div>
          <div class="setrow"><span>Null Drive address</span><input type="text" id="sBkServer" value="${esc(bk.server)}" placeholder="https://drive.example.com" spellcheck="false"></div>
          <div class="setrow"><span>API token</span><input type="password" id="sBkToken" value="" autocomplete="off" placeholder="${bk.has_token ? "Saved. Paste a new one to replace it" : "Paste a token from Drive"}" spellcheck="false"></div>
-         <div class="setnote">In Drive: Settings → Devices → Add device → Create an API token instead, scope <b>Everything</b>. The token is kept in Windows Credential Manager.</div>
+         <div class="setnote">In Drive: Settings → Devices → Add device → Create an API token instead, scope <b>Everything</b>. The token is kept ${/Windows/.test(navigator.userAgent) ? "in Windows Credential Manager" : /Mac/.test(navigator.userAgent) ? "in your Keychain" : "in a private file only you can read"}.</div>
          <div class="setrow"><span>Folder on Drive</span><input type="text" id="sBkFolder" value="${esc(bk.folder)}" placeholder="${esc(bk.default_folder)}" spellcheck="false"></div>
          <div class="row2" style="justify-content:flex-start"><button type="button" class="btn" id="sBkTest">Test connection</button><button type="button" class="btn" id="sBkNow" ${bk.enabled ? "" : "disabled"}>Back up now</button></div>
          <div class="setnote" id="sBkStatus"></div>

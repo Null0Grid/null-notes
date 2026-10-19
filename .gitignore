@@ -5,3 +5,6 @@ packaging/msix/stage/
 packaging/msix/*.msix
 packaging/msix/priconfig.xml
 packaging/msix/stage/
+*.deb
+*.msix
+packaging/msix/stage/
