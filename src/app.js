@@ -1167,6 +1167,11 @@ async function openSettings() {
          <div class="setrow"><span>API token</span><input type="password" id="sBkToken" value="" autocomplete="off" placeholder="${bk.has_token ? "Saved. Paste a new one to replace it" : "Paste a token from Drive"}" spellcheck="false"></div>
          <div class="setnote">In Drive: Settings → Devices → Add device → Create an API token instead, scope <b>Everything</b>. The token is kept ${/Windows/.test(navigator.userAgent) ? "in Windows Credential Manager" : /Mac/.test(navigator.userAgent) ? "in your Keychain" : "in a private file only you can read"}.</div>
          <div class="setrow"><span>Folder on Drive</span><input type="text" id="sBkFolder" value="${esc(bk.folder)}" placeholder="${esc(bk.default_folder)}" spellcheck="false"></div>
+         <div class="sub" id="sBkE2ee" hidden>
+           <div class="setnote" id="sBkE2eeNote"></div>
+           <div class="setrow" id="sBkUnlockRow"><span>E2EE passphrase or recovery key</span><input type="password" id="sBkSecret" autocomplete="off" spellcheck="false" placeholder="Not your Drive login password"></div>
+           <div class="row2" style="justify-content:flex-start"><button type="button" class="btn" id="sBkUnlock">Unlock</button><button type="button" class="btn" id="sBkForget" hidden>Forget key</button></div>
+         </div>
          <div class="row2" style="justify-content:flex-start"><button type="button" class="btn" id="sBkTest">Test connection</button><button type="button" class="btn" id="sBkNow" ${bk.enabled ? "" : "disabled"}>Back up now</button></div>
          <div class="setnote" id="sBkStatus"></div>
        </div>
@@ -1199,9 +1204,51 @@ async function openSettings() {
         q("sBkMode").onchange = modeNote;
         modeNote();
         drawBackupStatus(q("sBkStatus"), bk);
+        // End-to-end encrypted accounts (Phase 8): unlock with the E2EE passphrase or recovery key.
+        const conn = () => ({ server: q("sBkServer").value, token: q("sBkToken").value || null });
+        const drawE2ee = (info) => {
+          const box = q("sBkE2ee");
+          box.hidden = !info || info.state === "off";
+          if (box.hidden) return;
+          const note = q("sBkE2eeNote");
+          q("sBkForget").hidden = !info.unlocked && !info.key_changed;
+          q("sBkUnlockRow").hidden = q("sBkUnlock").hidden = !!info.unlocked;
+          if (info.unlocked) {
+            note.innerHTML = `<b>End-to-end encrypted.</b> Unlocked on this computer (key <code>${esc(info.fingerprint)}</code>). Names and notes are encrypted here before they're sent; Drive can't read them. The key is kept in ${/Windows/.test(navigator.userAgent) ? "Windows Credential Manager" : "a private file only you can read"}; your passphrase isn't kept.`;
+            note.className = "setnote";
+          } else if (info.key_changed) {
+            note.innerHTML = `<b>The account's encryption keys changed</b> (now <code>${esc(info.fingerprint)}</code>). Syncing stopped so nothing is written with the old key. Unlock again with the current passphrase or recovery key.`;
+            note.className = "setnote warn";
+          } else {
+            note.innerHTML = `<b>This account is end-to-end encrypted.</b> Unlock it once on this computer with your <b>E2EE passphrase</b> (not your Drive login password) or your <b>recovery key</b>. Then notes are encrypted here before they're sent.`;
+            note.className = "setnote";
+          }
+        };
+        const loadE2ee = async () => {
+          try { drawE2ee(await api("backup_e2ee_info", conn())); } catch { drawE2ee(null); }
+        };
+        if (bk.server && bk.has_token) loadE2ee();
+        q("sBkUnlock").onclick = async () => {
+          const b = q("sBkUnlock"), secret = q("sBkSecret").value;
+          if (!secret.trim()) { q("sBkSecret").focus(); return; }
+          b.disabled = true; b.textContent = "Unlocking…";
+          try {
+            const msg = await api("backup_unlock", { ...conn(), secret });
+            q("sBkSecret").value = "";
+            q("sBkStatus").textContent = msg; q("sBkStatus").className = "setnote";
+            toast(msg);
+            await loadE2ee();
+          } catch (e) { q("sBkE2eeNote").textContent = errText(e); q("sBkE2eeNote").className = "setnote warn"; }
+          b.disabled = false; b.textContent = "Unlock";
+        };
+        q("sBkSecret").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); q("sBkUnlock").click(); } });
+        q("sBkForget").onclick = async () => {
+          if (!confirm("Forget this account's encryption key on this computer? Sync stops until you unlock it again.")) return;
+          try { await api("backup_forget_key", { server: q("sBkServer").value }); await loadE2ee(); } catch (e) { toast(errText(e), true); }
+        };
         q("sBkTest").onclick = async () => {
           const b = q("sBkTest"); b.disabled = true; q("sBkStatus").textContent = "Connecting…"; q("sBkStatus").className = "setnote";
-          try { q("sBkStatus").textContent = await api("backup_test", { server: q("sBkServer").value, token: q("sBkToken").value || null }); }
+          try { q("sBkStatus").textContent = await api("backup_test", conn()); await loadE2ee(); }
           catch (e) { q("sBkStatus").textContent = errText(e); q("sBkStatus").className = "setnote warn"; }
           b.disabled = false;
         };

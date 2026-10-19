@@ -1,6 +1,6 @@
 [package]
 name = "null-notes"
-version = "3.5.1"
+version = "5.0.0"
 description = "Null Notes - a local markdown vault"
 authors = ["Luke"]
 edition = "2021"
@@ -37,6 +37,8 @@ tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 ureq = { version = "2", default-features = false, features = ["native-tls", "json"] }
 native-tls = "0.2"
 sha2 = "0.10"
+# Phase 8: encrypted Drive accounts
+hmac = "0.12"
 
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }

@@ -8,3 +8,5 @@ packaging/msix/stage/
 *.deb
 *.msix
 packaging/msix/stage/
+packaging/deb/null-notes_*/
+__pycache__/

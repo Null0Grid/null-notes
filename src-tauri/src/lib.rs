@@ -3,6 +3,11 @@
 
 mod agent;
 mod backup;
+mod e2ee;
+#[cfg(test)]
+mod e2ee_mock;
+#[cfg(test)]
+mod e2ee_tests;
 mod index;
 mod links;
 mod lock;
@@ -223,6 +228,27 @@ async fn backup_test(bk: State<'_, Arc<backup::Backup>>, server: String, token: 
 #[tauri::command]
 fn backup_now(bk: State<Arc<backup::Backup>>) {
     bk.back_up_now()
+}
+
+/* ---------------- end-to-end encrypted Drive accounts (Phase 8) ---------------- */
+
+/// `{ state, fingerprint, unlocked, key_changed }` for the Settings screen.
+#[tauri::command]
+async fn backup_e2ee_info(bk: State<'_, Arc<backup::Backup>>, server: String, token: Option<String>) -> R<serde_json::Value> {
+    let bk = bk.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || bk.e2ee_info(&server, token.as_deref())).await.map_err(|e| e.to_string())?
+}
+
+/// Unlock with the E2EE passphrase or recovery key. Argon2id takes a moment.
+#[tauri::command]
+async fn backup_unlock(bk: State<'_, Arc<backup::Backup>>, server: String, token: Option<String>, secret: String) -> R<String> {
+    let bk = bk.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || bk.unlock(&server, token.as_deref(), &secret)).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn backup_forget_key(bk: State<Arc<backup::Backup>>, server: String) -> R<()> {
+    bk.forget_key(&server)
 }
 
 #[tauri::command]
@@ -452,7 +478,7 @@ pub fn build(b: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
             encrypt_path, decrypt_path, read_locked, write_locked, create_locked, read_all_locked,
             agent_info, agent_set_origin, agent_new_token,
             take_pending_open,
-            backup_status, backup_configure, backup_test, backup_now,
+            backup_status, backup_configure, backup_test, backup_now, backup_e2ee_info, backup_unlock, backup_forget_key,
         ])
 }
 

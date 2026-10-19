@@ -93,6 +93,10 @@ pub struct Status {
     pub downloaded: usize,
     /// conflict copies made by the last sync (local paths)
     pub conflicts: Vec<String>,
+    /// an encryption key is stored for this server (Phase 8)
+    pub has_key: bool,
+    /// listing rows that couldn't be decrypted (plaintext leftovers, other keys)
+    pub undecryptable: usize,
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -268,8 +272,12 @@ pub enum DErr {
     Unauthorized,
     /// 403 insufficient_scope: a Search-only token
     Scope,
-    /// 409 e2ee_required
+    /// The account is end-to-end encrypted and this device hasn't unlocked it
+    /// (or it was just switched to encryption): 409 e2ee_required.
     E2ee,
+    /// The account's encryption keys changed since this device unlocked it
+    /// (fingerprint differs from the pinned one): stop until unlocked again.
+    E2eeKeyChanged,
     /// 400 invalid_path / invalid_mtime, 409 path_collision: this file only
     File(String),
     /// 5xx or network: worth retrying
@@ -285,7 +293,8 @@ impl DErr {
         match self {
             DErr::Unauthorized => "Null Drive refused the token. It may have been revoked: paste a new one.".into(),
             DErr::Scope => "That token is Search only. Create an API token with the Everything scope in Drive (Settings → Devices).".into(),
-            DErr::E2ee => "This Drive account uses end-to-end encryption, and Null Notes can't back up into it yet. Use an account without encryption.".into(),
+            DErr::E2ee => "This Drive account is end-to-end encrypted. Unlock it in Settings → Null Drive with your E2EE passphrase or recovery key.".into(),
+            DErr::E2eeKeyChanged => "The encryption keys of this Drive account changed since this computer unlocked it. Syncing stopped: unlock it again in Settings → Null Drive.".into(),
             DErr::File(m) | DErr::Other(m) => m.clone(),
             DErr::Transient(m) => format!("Couldn't reach Null Drive: {m}"),
             DErr::Precondition(m) => format!("{m}: changed on Drive meanwhile, will retry"),
@@ -315,6 +324,58 @@ pub struct Drive {
     agent: ureq::Agent,
     /// Backoff between retries (shortened in tests).
     pub backoff: Vec<Duration>,
+    /// Set on an end-to-end encrypted account (Phase 8): every request then
+    /// carries `X-NullDrive-E2EE: 1`, paths are encrypted per segment, and
+    /// content goes through the chunked v2 API.
+    pub keys: Option<Arc<crate::e2ee::Keys>>,
+}
+
+/// Write precondition, as in notes-sync-drive-api.md.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Precond {
+    /// `If-Match: *`: replace whatever is there (backup, ids.json)
+    Any,
+    /// `If-None-Match: *`: create only
+    Absent,
+    /// `If-Match: <v>`: replace only if Drive is still at v
+    Version(i64),
+}
+
+/// One listing row, path already decrypted on an encrypted account.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct Row {
+    pub path: String,
+    pub is_dir: bool,
+    pub size: u64,
+    /// plain account: SHA-256 of the content; encrypted: the keyed file hash
+    pub sha256: String,
+    pub mtime_ms: Option<i64>,
+    pub id: String,
+    pub version: i64,
+    pub synced_id: Option<String>,
+}
+
+/// `GET /api/v2/e2ee`
+#[derive(Debug, Clone, Default)]
+pub struct E2eeStatus {
+    /// off | migrating | on
+    pub state: String,
+    pub fingerprint: String,
+    pub bundle: Option<crate::e2ee::Bundle>,
+}
+
+/// The commit body for `PUT /api/v2/files/{path}` (notes-e2ee-drive-api.md §4.2).
+pub fn commit_body(k: &crate::e2ee::Keys, data: &[u8], chunks: &[(String, Vec<u8>)], mtime: Option<&str>) -> serde_json::Value {
+    let mut b = serde_json::json!({
+        "size": data.len(),
+        "sha256": k.file_hash(data),
+        "chunks": chunks.iter().map(|(h, s)| serde_json::json!({"hash": h, "size": s.len()})).collect::<Vec<_>>(),
+    });
+    if let Some(m) = mtime {
+        b["mtime"] = serde_json::Value::String(m.to_string());
+    }
+    b
 }
 
 impl Drive {
@@ -332,7 +393,33 @@ impl Drive {
             token: token.to_string(),
             agent,
             backoff: vec![Duration::from_secs(1), Duration::from_secs(4), Duration::from_secs(15)],
+            keys: None,
         })
+    }
+
+    pub fn encrypted(&self) -> bool {
+        self.keys.is_some()
+    }
+
+    /// A plaintext path as Drive sees it: encrypted per segment when the
+    /// account is, then URL-encoded per segment.
+    pub(crate) fn wire(&self, path: &str) -> Result<String, DErr> {
+        match &self.keys {
+            None => Ok(path.to_string()),
+            Some(k) => k.encrypt_path(path).map_err(|e| DErr::File(format!("{path}: {e}"))),
+        }
+    }
+
+    pub(crate) fn wire_url(&self, path: &str) -> Result<String, DErr> {
+        Ok(enc_path(&self.wire(path)?))
+    }
+
+    /// What Drive's `sha256` is for content with this plain SHA-256.
+    pub fn tag(&self, plain_sha: &str) -> String {
+        match &self.keys {
+            None => plain_sha.to_string(),
+            Some(k) => k.tag_sha(plain_sha),
+        }
     }
 
     fn url(&self, path: &str) -> String {
@@ -340,7 +427,8 @@ impl Drive {
     }
 
     pub(crate) fn req(&self, method: &str, path: &str) -> ureq::Request {
-        self.agent.request(method, &self.url(path)).set("Authorization", &format!("Bearer {}", self.token))
+        let r = self.agent.request(method, &self.url(path)).set("Authorization", &format!("Bearer {}", self.token));
+        if self.keys.is_some() { r.set("X-NullDrive-E2EE", "1") } else { r }
     }
 
     pub(crate) fn classify(e: ureq::Error, what: &str) -> DErr {
@@ -355,6 +443,8 @@ impl Drive {
                     (401, _) => DErr::Unauthorized,
                     (403, "insufficient_scope") => DErr::Scope,
                     (409, "e2ee_required") => DErr::E2ee,
+                    (409, "e2ee_client_required") | (409, "e2ee_path_required") | (400, "invalid_manifest") => DErr::Other(format!("{what}: Drive refused an encrypted request ({errcode}): a Null Notes bug, please report")),
+                    (400, "hash_mismatch") => DErr::Transient(format!("{what}: a chunk arrived damaged")),
                     (400, "invalid_path") => DErr::File(format!("{what}: Null Drive can't store this name")),
                     (400, "invalid_mtime") => DErr::File(format!("{what}: Drive refused its modified time")),
                     (409, "path_collision") => DErr::File(format!("{what}: a file and a folder have the same name on Drive")),
@@ -396,29 +486,162 @@ impl Drive {
     }
 
     pub fn mkdir(&self, path: &str) -> Result<(), DErr> {
-        self.retry(path, || self.req("POST", "/api/v1/folders").send_json(serde_json::json!({ "path": path }))).map(|_| ())
+        let wire = self.wire(path)?;
+        self.retry(path, || self.req("POST", "/api/v1/folders").send_json(serde_json::json!({ "path": wire }))).map(|_| ())
+    }
+
+    /// `GET /api/v2/e2ee`. A server without it (before 0.8) is treated as
+    /// plain when `/me` says encryption is off.
+    pub fn e2ee_status(&self) -> Result<E2eeStatus, DErr> {
+        match self.req("GET", "/api/v2/e2ee").call() {
+            Ok(r) => {
+                let v: serde_json::Value = r.into_json().map_err(|e| DErr::Other(format!("encryption status: {e}")))?;
+                let state = v.get("state").and_then(|x| x.as_str()).unwrap_or("off").to_string();
+                let bundle = v.get("bundle").filter(|b| !b.is_null()).map(|b| serde_json::from_value(b.clone())).transpose()
+                    .map_err(|e| DErr::Other(format!("Null Drive sent an encryption key bundle Null Notes doesn't understand ({e}).")))?;
+                Ok(E2eeStatus { fingerprint: v.get("fingerprint").and_then(|x| x.as_str()).unwrap_or("").to_string(), state, bundle })
+            }
+            Err(ureq::Error::Status(404, _)) => {
+                let me = self.me()?;
+                Ok(E2eeStatus { state: me.e2ee, ..Default::default() })
+            }
+            Err(e) => Err(Self::classify(e, "encryption status")),
+        }
+    }
+
+    /// Every row under `prefix` (not deleted), paths decrypted. Rows that
+    /// don't decrypt (plaintext leftovers while Drive migrates, other keys)
+    /// are skipped and counted.
+    pub fn list_rows(&self, prefix: &str) -> Result<(Vec<Row>, usize), DErr> {
+        let url = format!("/api/v1/files?prefix={}", self.wire_url(prefix)?);
+        let r = self.retry("listing", || self.req("GET", &url).call())?;
+        let v: serde_json::Value = r.into_json().map_err(|e| DErr::Other(format!("listing: {e}")))?;
+        let arr = v.get("files").and_then(|f| f.as_array()).cloned().unwrap_or_default();
+        let mut skipped = 0;
+        let mut out = Vec::new();
+        for f in arr.iter().filter(|f| !f.get("deleted").and_then(|d| d.as_bool()).unwrap_or(false)) {
+            let Some(raw) = f.get("path").and_then(|p| p.as_str()).map(|p| p.trim_matches('/')) else { continue };
+            let path = match &self.keys {
+                None => raw.to_string(),
+                Some(k) => match k.decrypt_path(raw) {
+                    Ok(p) => p,
+                    Err(_) => {
+                        skipped += 1;
+                        continue;
+                    }
+                },
+            };
+            out.push(Row {
+                path,
+                is_dir: f.get("is_dir").and_then(|x| x.as_bool()).unwrap_or(false),
+                size: f.get("size").and_then(|x| x.as_u64()).unwrap_or(0),
+                sha256: f.get("sha256").and_then(|x| x.as_str()).unwrap_or("").to_ascii_lowercase(),
+                mtime_ms: f.get("mtime").and_then(|x| x.as_str()).and_then(parse_ms),
+                id: f.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                version: f.get("version").and_then(|x| x.as_i64()).unwrap_or(0),
+                synced_id: if self.keys.is_some() { None } else { f.get("synced_id").and_then(|x| x.as_str()).map(|s| s.to_lowercase()) },
+            });
+        }
+        Ok((out, skipped))
     }
 
     pub fn list(&self, prefix: &str) -> Result<Vec<RemoteFile>, DErr> {
-        let r = self.retry("listing", || self.req("GET", &format!("/api/v1/files?prefix={}", enc_path(prefix))).call())?;
-        let v: serde_json::Value = r.into_json().map_err(|e| DErr::Other(format!("listing: {e}")))?;
-        let arr = v.get("files").and_then(|f| f.as_array()).cloned().unwrap_or_default();
-        Ok(arr
-            .iter()
-            .filter(|f| !f.get("deleted").and_then(|d| d.as_bool()).unwrap_or(false))
-            .filter_map(|f| {
-                Some(RemoteFile {
-                    path: f.get("path")?.as_str()?.trim_matches('/').to_string(),
-                    is_dir: f.get("is_dir").and_then(|x| x.as_bool()).unwrap_or(false),
-                    size: f.get("size").and_then(|x| x.as_u64()).unwrap_or(0),
-                    sha256: f.get("sha256").and_then(|x| x.as_str()).unwrap_or("").to_ascii_lowercase(),
-                    mtime_ms: f.get("mtime").and_then(|x| x.as_str()).and_then(parse_ms),
-                })
-            })
+        Ok(self
+            .list_rows(prefix)?
+            .0
+            .into_iter()
+            .map(|r| RemoteFile { path: r.path, is_dir: r.is_dir, size: r.size, sha256: r.sha256, mtime_ms: r.mtime_ms })
             .collect())
     }
 
+    /* ---- encrypted content (notes-e2ee-drive-api.md §4.2) ---- */
+
+    /// Chunk check, chunk upload, commit. No mtime is sent: it would be
+    /// plaintext metadata, and Notes detects changes by hash and version.
+    pub fn commit_encrypted(&self, path: &str, data: &[u8], pre: &Precond) -> Result<(), DErr> {
+        let k = self.keys.as_ref().ok_or(DErr::Other("not an encrypted account".into()))?;
+        if let Some(why) = crate::e2ee::unsafe_name(path) {
+            return Err(DErr::File(format!("{path}: Null Drive can't store this name ({why})")));
+        }
+        let chunks = k.seal_content(data);
+        let body = commit_body(k, data, &chunks, None);
+        let url = format!("/api/v2/files/{}", self.wire_url(path)?);
+        let upload_missing = |want: &[String]| -> Result<(), DErr> {
+            for (h, sealed) in chunks.iter().filter(|(h, _)| want.contains(h)) {
+                self.retry(path, || self.req("PUT", &format!("/api/v2/chunks/{h}")).set("Content-Type", "application/octet-stream").send_bytes(sealed))?;
+            }
+            Ok(())
+        };
+        if !chunks.is_empty() {
+            let hashes: Vec<&String> = chunks.iter().map(|(h, _)| h).collect();
+            let r: serde_json::Value = self
+                .retry(path, || self.req("POST", "/api/v2/chunks/check").send_json(serde_json::json!({ "hashes": hashes })))?
+                .into_json()
+                .map_err(|e| DErr::Other(format!("{path}: {e}")))?;
+            let missing: Vec<String> = r.get("missing").and_then(|m| m.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+            upload_missing(&missing)?;
+        }
+        for attempt in 0..2 {
+            let res = self.retry_with(|| {
+                let mut req = self.req("PUT", &url).set("Content-Type", "application/json");
+                req = match pre {
+                    Precond::Any => req.set("If-Match", "*"),
+                    Precond::Absent => req.set("If-None-Match", "*"),
+                    Precond::Version(v) => req.set("If-Match", &format!("\"{v}\"")),
+                };
+                match req.send_json(body.clone()) {
+                    Ok(_) => Ok(None),
+                    // 422 missing_chunks: upload the listed ones and commit again
+                    Err(ureq::Error::Status(422, resp)) => {
+                        let v: serde_json::Value = resp.into_json().unwrap_or_default();
+                        let m = v.get("missing").or_else(|| v.get("error").and_then(|e| e.get("missing"))).and_then(|m| m.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>()).unwrap_or_default();
+                        Ok(Some(m))
+                    }
+                    Err(e) => Err(Self::classify(e, path)),
+                }
+            })?;
+            match res {
+                None => return Ok(()),
+                Some(m) if attempt == 0 && !m.is_empty() => upload_missing(&m)?,
+                Some(_) => break,
+            }
+        }
+        Err(DErr::Other(format!("{path}: Drive kept asking for chunks that were uploaded")))
+    }
+
+    /// Manifest, then each chunk, opened and checked against size and hash.
+    pub fn download_encrypted(&self, path: &str) -> Result<Vec<u8>, DErr> {
+        let k = self.keys.as_ref().ok_or(DErr::Other("not an encrypted account".into()))?;
+        let url = format!("/api/v2/files/{}/manifest", self.wire_url(path)?);
+        let m: serde_json::Value = self.retry(path, || self.req("GET", &url).call())?.into_json().map_err(|e| DErr::Transient(format!("{path}: {e}")))?;
+        let mut out = Vec::with_capacity(m.get("size").and_then(|x| x.as_u64()).unwrap_or(0) as usize);
+        for c in m.get("chunks").and_then(|c| c.as_array()).map(|a| a.as_slice()).unwrap_or(&[]) {
+            let h = c.get("hash").and_then(|x| x.as_str()).unwrap_or("");
+            let sealed = self.retry_with(|| {
+                let r = self.req("GET", &format!("/api/v2/chunks/{h}")).call().map_err(|e| Self::classify(e, path))?;
+                let mut buf = Vec::new();
+                r.into_reader().read_to_end(&mut buf).map_err(|e| DErr::Transient(format!("{path}: {e}")))?;
+                if sha256_hex(&buf) != h {
+                    return Err(DErr::Transient(format!("{path}: download was cut short")));
+                }
+                Ok(buf)
+            })?;
+            // never written anywhere if it doesn't open: corrupt, or other keys
+            out.extend(k.open_chunk(&sealed).map_err(|_| DErr::File(format!("{path}: couldn't be decrypted with this account's key (damaged on Drive?). Nothing was changed here.")))?);
+        }
+        let size = m.get("size").and_then(|x| x.as_u64()).unwrap_or(u64::MAX);
+        let sha = m.get("sha256").and_then(|x| x.as_str()).unwrap_or("");
+        if out.len() as u64 != size || k.file_hash(&out) != sha {
+            return Err(DErr::File(format!("{path}: the decrypted content doesn't match Drive's manifest. Nothing was changed here.")));
+        }
+        Ok(out)
+    }
+
     pub fn put(&self, remote: &str, abs: &Path, mtime_ms: i64, sha: &str) -> Result<(), DErr> {
+        if self.encrypted() {
+            let data = fs::read(abs).map_err(|e| DErr::File(format!("{remote}: couldn't read it ({e})")))?;
+            return self.commit_encrypted(remote, &data, &Precond::Any);
+        }
         self.retry_with(|| {
             // reopened on every attempt: the body is streamed from disk
             let f = fs::File::open(abs).map_err(|e| DErr::File(format!("{remote}: couldn't read it ({e})")))?;
@@ -438,7 +661,8 @@ impl Drive {
     }
 
     pub fn delete(&self, remote: &str) -> Result<(), DErr> {
-        match self.retry(remote, || self.req("DELETE", &format!("/api/v1/files/{}", enc_path(remote))).set("If-Match", "*").call()) {
+        let url = format!("/api/v1/files/{}", self.wire_url(remote)?);
+        match self.retry(remote, || self.req("DELETE", &url).set("If-Match", "*").call()) {
             Ok(_) => Ok(()),
             Err(DErr::Other(m)) if m.contains("answered 404") => Ok(()), // already gone
             Err(DErr::Precondition(_)) => Ok(()),                         // 404 not_found: already gone
@@ -447,7 +671,8 @@ impl Drive {
     }
 
     pub fn mv(&self, from: &str, to: &str) -> Result<(), DErr> {
-        self.retry(from, || self.req("POST", "/api/v1/files/move").send_json(serde_json::json!({ "from": from, "to": to }))).map(|_| ())
+        let body = serde_json::json!({ "from": self.wire(from)?, "to": self.wire(to)? });
+        self.retry(from, || self.req("POST", "/api/v1/files/move").send_json(body.clone())).map(|_| ())
     }
 }
 
@@ -458,7 +683,7 @@ impl Drive {
 pub fn run_once(root: &Path, folder: &str, drive: &Drive, state: &mut State) -> Result<Report, DErr> {
     let mut rep = Report::default();
     let me = drive.me()?;
-    if me.e2ee != "off" {
+    if me.e2ee != "off" && !drive.encrypted() {
         return Err(DErr::E2ee);
     }
     if !root.is_dir() {
@@ -469,7 +694,11 @@ pub fn run_once(root: &Path, folder: &str, drive: &Drive, state: &mut State) -> 
     let full = |rel: &str| format!("{folder}/{rel}");
     let rel_of = |remote: &str| remote.strip_prefix(&format!("{folder}/")).map(String::from);
 
-    let mut remote = drive.list(folder)?;
+    let (rows, skipped) = drive.list_rows(folder)?;
+    let mut remote: Vec<RemoteFile> = rows.into_iter().map(|r| RemoteFile { path: r.path, is_dir: r.is_dir, size: r.size, sha256: r.sha256, mtime_ms: r.mtime_ms }).collect();
+    if skipped > 0 {
+        rep.problems.push(format!("{skipped} file{} in the Drive folder couldn't be decrypted with this account's key and {} left alone.", if skipped == 1 { "" } else { "s" }, if skipped == 1 { "was" } else { "were" }));
+    }
 
     // 1. Replay renames made in the app as moves, so Drive keeps id and history.
     let moves = std::mem::take(&mut state.pending_moves);
@@ -488,7 +717,7 @@ pub fn run_once(root: &Path, folder: &str, drive: &Drive, state: &mut State) -> 
                             state.files.insert(format!("{to}{}", &p[from.len()..]), r);
                         }
                     }
-                    Err(e @ (DErr::Unauthorized | DErr::Scope | DErr::E2ee | DErr::Transient(_))) => return Err(e),
+                    Err(e @ (DErr::Unauthorized | DErr::Scope | DErr::E2ee | DErr::E2eeKeyChanged | DErr::Transient(_))) => return Err(e),
                     Err(_) => {} // fall back to upload-new + delete-old
                 }
             }
@@ -514,7 +743,8 @@ pub fn run_once(root: &Path, folder: &str, drive: &Drive, state: &mut State) -> 
                 }
             },
         };
-        let same = rfiles.get(rel).map(|r| r.size == *size && r.sha256 == sha).unwrap_or(false);
+        // on an encrypted account Drive's sha256 is the keyed hash of the plaintext
+        let same = rfiles.get(rel).map(|r| r.size == *size && r.sha256 == drive.tag(&sha)).unwrap_or(false);
         if same {
             rep.unchanged += 1;
         } else {
@@ -588,18 +818,23 @@ pub fn run_once(root: &Path, folder: &str, drive: &Drive, state: &mut State) -> 
 /* ======================= token storage ======================= */
 
 pub mod secrets {
-    //! The Drive token lives in Windows Credential Manager (macOS: Keychain).
-    //! Elsewhere (Linux), a file only this user can read in the config folder.
+    //! The Drive token, and on encrypted accounts the account's master key,
+    //! live in Windows Credential Manager (macOS: Keychain). Elsewhere
+    //! (Linux), a file only this user can read in the config folder.
+    //! Never in backup.json, never in the vault.
     use std::collections::BTreeMap;
     use std::path::Path;
 
-    fn account(server: &str) -> String {
+    fn token_account(server: &str) -> String {
         format!("drive-backup:{server}")
+    }
+    fn key_account(server: &str) -> String {
+        format!("drive-e2ee:{server}")
     }
 
     #[allow(dead_code)]
-    fn kr_get(server: &str) -> Result<Option<String>, String> {
-        let e = keyring::Entry::new(super::KEYRING_SERVICE, &account(server)).map_err(|e| e.to_string())?;
+    fn kr_get(account: &str) -> Result<Option<String>, String> {
+        let e = keyring::Entry::new(super::KEYRING_SERVICE, account).map_err(|e| e.to_string())?;
         match e.get_password() {
             Ok(t) => Ok(Some(t)),
             Err(keyring::Error::NoEntry) => Ok(None),
@@ -607,12 +842,12 @@ pub mod secrets {
         }
     }
     #[allow(dead_code)]
-    fn kr_set(server: &str, token: &str) -> Result<(), String> {
-        keyring::Entry::new(super::KEYRING_SERVICE, &account(server)).and_then(|e| e.set_password(token)).map_err(|e| e.to_string())
+    fn kr_set(account: &str, value: &str) -> Result<(), String> {
+        keyring::Entry::new(super::KEYRING_SERVICE, account).and_then(|e| e.set_password(value)).map_err(|e| e.to_string())
     }
     #[allow(dead_code)]
-    fn kr_del(server: &str) -> Result<(), String> {
-        match keyring::Entry::new(super::KEYRING_SERVICE, &account(server)).and_then(|e| e.delete_credential()) {
+    fn kr_del(account: &str) -> Result<(), String> {
+        match keyring::Entry::new(super::KEYRING_SERVICE, account).and_then(|e| e.delete_credential()) {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(e) => Err(e.to_string()),
         }
@@ -638,28 +873,81 @@ pub mod secrets {
 
     const USE_KEYRING: bool = cfg!(any(windows, target_os = "macos"));
 
-    pub fn get(dir: &Path, server: &str) -> Option<String> {
+    fn get_raw(dir: &Path, account: &str) -> Option<String> {
         if USE_KEYRING {
-            return kr_get(server).ok().flatten();
+            return kr_get(account).ok().flatten();
         }
-        f_load(dir).get(&account(server)).cloned()
+        f_load(dir).get(account).cloned()
+    }
+    fn set_raw(dir: &Path, account: &str, value: &str) -> Result<(), String> {
+        if USE_KEYRING {
+            return kr_set(account, value).map_err(|e| format!("Couldn't save it in {}: {e}", if cfg!(windows) { "Windows Credential Manager" } else { "the Keychain" }));
+        }
+        let mut m = f_load(dir);
+        m.insert(account.to_string(), value.to_string());
+        f_save(dir, &m)
+    }
+    fn delete_raw(dir: &Path, account: &str) -> Result<(), String> {
+        if USE_KEYRING {
+            return kr_del(account);
+        }
+        let mut m = f_load(dir);
+        if m.remove(account).is_some() {
+            f_save(dir, &m)?;
+        }
+        Ok(())
+    }
+
+    pub fn get(dir: &Path, server: &str) -> Option<String> {
+        get_raw(dir, &token_account(server))
     }
     pub fn set(dir: &Path, server: &str, token: &str) -> Result<(), String> {
-        if USE_KEYRING {
-            return kr_set(server, token).map_err(|e| format!("Couldn't save the token in Windows Credential Manager: {e}"));
-        }
-        let mut m = f_load(dir);
-        m.insert(account(server), token.to_string());
-        f_save(dir, &m)
+        set_raw(dir, &token_account(server), token)
     }
     pub fn delete(dir: &Path, server: &str) -> Result<(), String> {
-        if USE_KEYRING {
-            return kr_del(server);
-        }
-        let mut m = f_load(dir);
-        m.remove(&account(server));
-        f_save(dir, &m)
+        delete_raw(dir, &token_account(server))
     }
+
+    /// An unlocked encryption key: the master key and the fingerprint it
+    /// was pinned with. The passphrase is never stored.
+    #[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq)]
+    pub struct StoredKey {
+        pub fingerprint: String,
+        pub master: String,
+    }
+    impl std::fmt::Debug for StoredKey {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "StoredKey({})", self.fingerprint)
+        }
+    }
+
+    pub fn get_key(dir: &Path, server: &str) -> Option<StoredKey> {
+        get_raw(dir, &key_account(server)).and_then(|s| serde_json::from_str(&s).ok())
+    }
+    pub fn set_key(dir: &Path, server: &str, k: &StoredKey) -> Result<(), String> {
+        set_raw(dir, &key_account(server), &serde_json::to_string(k).unwrap())
+    }
+    pub fn delete_key(dir: &Path, server: &str) -> Result<(), String> {
+        delete_raw(dir, &key_account(server))
+    }
+}
+
+/// Make a Drive client for a run: plain, or with the stored key when the
+/// account is encrypted. Checks the pinned fingerprint against Drive's.
+pub fn open_drive(secrets_dir: &Path, server: &str, token: &str) -> Result<Drive, DErr> {
+    let mut d = Drive::new(server, token).map_err(DErr::Other)?;
+    let st = d.e2ee_status()?;
+    if st.state == "off" {
+        return Ok(d);
+    }
+    let Some(stored) = secrets::get_key(secrets_dir, server) else { return Err(DErr::E2ee) };
+    let keys = crate::e2ee::unhex(&stored.master).and_then(|m| crate::e2ee::Keys::from_master(&m).ok()).ok_or(DErr::E2ee)?;
+    let server_fp = if st.fingerprint.is_empty() { st.bundle.as_ref().map(|b| b.fingerprint.clone()).unwrap_or_default() } else { st.fingerprint.clone() };
+    if keys.fingerprint() != stored.fingerprint || stored.fingerprint != server_fp {
+        return Err(DErr::E2eeKeyChanged);
+    }
+    d.keys = Some(Arc::new(keys));
+    Ok(d)
 }
 
 /* ======================= scheduler ======================= */
@@ -775,6 +1063,7 @@ impl Backup {
         g.status.folder = if g.cfg.folder.is_empty() { default_folder(&name) } else { g.cfg.folder.clone() };
         g.status.mode = if g.cfg.two_way() { "sync".into() } else { "backup".into() };
         g.status.has_token = !g.cfg.server.is_empty() && secrets::get(&self.secrets_dir, &g.cfg.server).is_some();
+        g.status.has_key = !g.cfg.server.is_empty() && secrets::get_key(&self.secrets_dir, &g.cfg.server).is_some();
         if !g.status.enabled {
             g.status.state = "off".into();
         } else if g.status.state == "off" {
@@ -859,12 +1148,86 @@ impl Backup {
         let mut d = Drive::new(&server, &token)?;
         d.backoff = vec![];
         let me = d.me().map_err(|e| e.user_message())?;
-        if me.e2ee != "off" {
-            return Err(DErr::E2ee.user_message());
+        let hello = if me.name.is_empty() { "Connected.".to_string() } else { format!("Connected as {}.", me.name) };
+        let st = d.e2ee_status().map_err(|e| e.user_message())?;
+        if st.state != "off" {
+            // checked with the stored key, if any (a Search-only token fails the listing)
+            return match open_drive(&self.secrets_dir, &server, &token) {
+                Ok(mut d) => {
+                    d.backoff = vec![];
+                    d.list("Null Notes").map_err(|e| e.user_message())?;
+                    Ok(format!("{hello} End-to-end encrypted, unlocked on this computer (key {}).", st.fingerprint))
+                }
+                Err(DErr::E2eeKeyChanged) => Err(format!("{hello} {}", DErr::E2eeKeyChanged.user_message())),
+                Err(DErr::E2ee) => Ok(format!("{hello} This account is end-to-end encrypted: unlock it below with your E2EE passphrase or recovery key.")),
+                Err(e) => Err(e.user_message()),
+            };
         }
         // A Search-only token can read /me but not the files API.
         d.list("Null Notes").map_err(|e| e.user_message())?;
-        Ok(if me.name.is_empty() { "Connected.".into() } else { format!("Connected as {}.", me.name) })
+        Ok(hello)
+    }
+
+    /// Encryption state for Settings: is the account encrypted, and is it
+    /// unlocked here with a key matching Drive's fingerprint?
+    pub fn e2ee_info(&self, server: &str, token: Option<&str>) -> Result<serde_json::Value, String> {
+        let server = clean_server(server)?;
+        let token = match token.filter(|t| !t.trim().is_empty()) {
+            Some(t) => t.trim().to_string(),
+            None => secrets::get(&self.secrets_dir, &server).ok_or("Paste a Null Drive API token first.")?,
+        };
+        let mut d = Drive::new(&server, &token)?;
+        d.backoff = vec![];
+        let st = d.e2ee_status().map_err(|e| e.user_message())?;
+        let stored = secrets::get_key(&self.secrets_dir, &server);
+        let unlocked = st.state != "off" && stored.as_ref().map(|k| k.fingerprint == st.fingerprint).unwrap_or(false);
+        let key_changed = st.state != "off" && stored.is_some() && !unlocked;
+        Ok(serde_json::json!({ "state": st.state, "fingerprint": st.fingerprint, "unlocked": unlocked, "key_changed": key_changed }))
+    }
+
+    /// Unlock with the E2EE passphrase or recovery key: fetch the bundle,
+    /// unwrap the master key, check the fingerprint, keep the key (keychain)
+    /// pinned to that fingerprint. The passphrase itself is never kept.
+    pub fn unlock(&self, server: &str, token: Option<&str>, secret: &str) -> Result<String, String> {
+        let server = clean_server(server)?;
+        let token = match token.filter(|t| !t.trim().is_empty()) {
+            Some(t) => t.trim().to_string(),
+            None => secrets::get(&self.secrets_dir, &server).ok_or("Paste a Null Drive API token first.")?,
+        };
+        let mut d = Drive::new(&server, &token)?;
+        d.backoff = vec![];
+        let st = d.e2ee_status().map_err(|e| e.user_message())?;
+        if st.state == "off" {
+            return Err("This Drive account isn't end-to-end encrypted: there's nothing to unlock.".into());
+        }
+        let bundle = st.bundle.ok_or("Null Drive didn't send the account's key bundle.")?;
+        if bundle.fingerprint != st.fingerprint && !st.fingerprint.is_empty() {
+            return Err("Null Drive's key bundle doesn't match the account's fingerprint. Nothing was unlocked.".into());
+        }
+        let secret = secret.trim();
+        if secret.is_empty() {
+            return Err("Type your E2EE passphrase or recovery key.".into());
+        }
+        let keys = crate::e2ee::unlock(&bundle, &crate::e2ee::guess_secret(secret)).map_err(|e| match e {
+            crate::e2ee::E2eeErr::Decrypt => match crate::e2ee::guess_secret(secret) {
+                crate::e2ee::Secret::RecoveryKey(_) => "That recovery key doesn't unlock this account.".to_string(),
+                crate::e2ee::Secret::Passphrase(_) => "That passphrase doesn't unlock this account. It's your E2EE passphrase, not your Drive login password.".to_string(),
+            },
+            crate::e2ee::E2eeErr::Fingerprint => "The unlocked key doesn't match the account's fingerprint. Nothing was saved.".to_string(),
+            crate::e2ee::E2eeErr::Format(m) => m,
+        })?;
+        secrets::set_key(&self.secrets_dir, &server, &secrets::StoredKey { fingerprint: keys.fingerprint(), master: keys.master_hex() })?;
+        let mut g = self.inner.lock().unwrap();
+        if g.cfg.enabled && g.cfg.server == server {
+            g.run_now = true;
+            self.cv.notify_all();
+        }
+        Ok(format!("Unlocked. Key {} is saved on this computer; your passphrase isn't.", keys.fingerprint()))
+    }
+
+    /// Forget the stored key for this server (Settings → "Forget key").
+    pub fn forget_key(&self, server: &str) -> Result<(), String> {
+        secrets::delete_key(&self.secrets_dir, &clean_server(server)?)
     }
 
     /// A file changed in the vault (watcher). Runs after a quiet period.
@@ -961,8 +1324,8 @@ impl Backup {
         let folder = if cfg.folder.is_empty() { default_folder(&root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()) } else { cfg.folder.clone() };
         let result = match secrets::get(&self.secrets_dir, &cfg.server) {
             None => Err(DErr::Other("Paste a Null Drive API token in Settings → Back up to Null Drive.".into())),
-            Some(token) => match Drive::new(&cfg.server, &token) {
-                Err(e) => Err(DErr::Other(e)),
+            Some(token) => match open_drive(&self.secrets_dir, &cfg.server, &token) {
+                Err(e) => Err(e),
                 Ok(drive) => {
                     let mut st = self.load_state(&root);
                     if st.server != cfg.server || st.folder != folder {
@@ -1015,22 +1378,21 @@ impl Backup {
         let folder = if cfg.folder.is_empty() { default_folder(&root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()) } else { cfg.folder.clone() };
         let result = match secrets::get(&self.secrets_dir, &cfg.server) {
             None => Err(DErr::Other("Paste a Null Drive API token in Settings → Null Drive.".into())),
-            Some(token) => match Drive::new(&cfg.server, &token) {
-                Err(e) => Err(DErr::Other(e)),
+            Some(token) => match open_drive(&self.secrets_dir, &cfg.server, &token) {
+                Err(e) => Err(e),
                 Ok(drive) => (|| {
-                    let me = drive.me()?;
-                    if me.e2ee != "off" {
-                        return Err(DErr::E2ee);
-                    }
                     drive.mkdir(&folder)?;
                     let mut st = self.load_sync_state(&root);
-                    if st.server != cfg.server || st.folder != folder {
-                        st = crate::sync::SyncState { server: cfg.server.clone(), folder: folder.clone(), ..Default::default() };
+                    // hashes in the base are keyed on an encrypted account: a
+                    // different key (or none) means starting over with an add-only merge
+                    let fp = drive.keys.as_ref().map(|k| k.fingerprint()).unwrap_or_default();
+                    if st.server != cfg.server || st.folder != folder || st.e2ee != fp {
+                        st = crate::sync::SyncState { server: cfg.server.clone(), folder: folder.clone(), e2ee: fp, ..Default::default() };
                     }
-                    let remote = crate::sync::DriveRemote { drive: &drive, folder: folder.clone() };
+                    let remote = crate::sync::DriveRemote::new(&drive, folder.clone());
                     let r = crate::sync::run_sync(&root, &remote, &mut st, force);
                     self.save_sync_state(&root, &st);
-                    r
+                    r.map(|rep| (rep, remote.skipped.get()))
                 })(),
             },
         };
@@ -1040,7 +1402,8 @@ impl Backup {
         }
         g.status.last_run = Some(now_rfc3339());
         match result {
-            Ok(rep) => {
+            Ok((rep, skipped)) => {
+                g.status.undecryptable = skipped;
                 g.status.state = "idle".into();
                 g.status.last_ok = g.status.last_run.clone();
                 g.status.uploaded = rep.uploaded.len();

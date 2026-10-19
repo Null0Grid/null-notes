@@ -217,6 +217,8 @@ async function mock(cmd, a) {
     case "backup_configure": if (a.enabled && !a.server) fail("Enter the Null Drive address, like https://drive.example.com"); Object.assign(M.backup, { enabled: a.enabled, mode: a.mode || "backup", server: a.server, folder: a.folder, has_token: M.backup.has_token || !!a.token }); return mock("backup_status", {});
     case "backup_test": fail("The browser demo can't reach Null Drive.");
     case "backup_now": return null;
+    case "backup_e2ee_info": return { state: "off", fingerprint: "", unlocked: false, key_changed: false };
+    case "backup_unlock": case "backup_forget_key": fail("The browser demo can't reach Null Drive.");
     case "agent_info": return { ...M.agent, address: "http://127.0.0.1:47821", status: "Not running in the browser demo", indexed: false };
     case "agent_set_origin": M.agent.origin = a.origin; return mock("agent_info", {});
     case "agent_new_token": M.agent.token = [...crypto.getRandomValues(new Uint8Array(32))].map((b) => b.toString(16).padStart(2, "0")).join(""); return mock("agent_info", {});

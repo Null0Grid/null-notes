@@ -1,6 +1,6 @@
-# Null Notes (v3.5.1)
+# Null Notes (v5.0.0)
 
-0.7.0 adds two-way sync with Null Drive (Phase 7). 0.6.0 added an opt-in backup to Null Drive (Phase 6). 0.5.0 added `nullnotes://` links (Phase 5). 0.4.0 added Phase 1 of cross-product search (see the Null Grid search contract v1). The rest of this file describes the 0.3.1 recovery.
+5.0.0 adds backup and two-way sync into end-to-end encrypted Null Drive accounts (Phase 8). 0.7.0 added two-way sync with Null Drive (Phase 7). 0.6.0 added an opt-in backup to Null Drive (Phase 6). 0.5.0 added `nullnotes://` links (Phase 5). 0.4.0 added Phase 1 of cross-product search (see the Null Grid search contract v1). The rest of this file describes the 0.3.1 recovery.
 
 ## Phase 1: search agent
 
@@ -62,6 +62,34 @@ Settings → **Null Drive** → Mode → *Two-way sync*. It uses the same addres
 - `.nullnotes/ids.json` isn't synced as a file: both sides' maps are merged. The base and hash cache live in `%LOCALAPPDATA%\dev.nullgrid.notes\backup\sync-<hash>.json`. Switching mode or folder resets the base, so the first run is an add-only merge.
 - **Not covered:** end-to-end-encrypted Drive accounts (as before). A *locked* note edited on two devices gets a conflict copy with the same (encrypted) note id. Empty folders are created but not deleted.
 - **Try it:** `python3 tools/mock_drive.py 8765 mytoken` now implements the sync contract too. `POST /_edit?path=…` plays "another device".
+
+## Phase 8: end-to-end encrypted Drive accounts (5.0.0)
+
+Backup and two-way sync now work into Null Drive accounts that have end-to-end encryption (Drive 0.8.3+), following Drive's published client protocol, `null-grid/notes-e2ee-drive-api.md`. Before 5.0, such accounts answered `409 e2ee_required`. Plain accounts use exactly the code they used before.
+
+- **Unlock once per computer.** Settings → Null Drive → Test connection detects the encryption (`GET /api/v2/e2ee`) and shows *E2EE passphrase or recovery key* → Unlock. That's the passphrase from Drive's encryption setup, not the Drive login.
+  - **The key:** Argon2id with the bundle's parameters (or HKDF for the recovery key) unwraps the 32-byte master key with XChaCha20-Poly1305. Seven HKDF-SHA256 subkeys come from it.
+  - **The fingerprint** must match Drive's. The master key is stored in Windows Credential Manager (`drive-e2ee:<server>`; on Linux the `0600` secrets file), pinned to that fingerprint. The passphrase is never stored.
+  - **Bundle limits:** a bundle Notes doesn't understand is refused before anything is derived (version, kdf, t 1–20, m 8–1024 MiB, p 1, salt and wrap lengths).
+- **Every request** carries `X-NullDrive-E2EE: 1`.
+- **Names:** every path segment, and the `?prefix=`, is encrypted on its own: ISO 7816-4 padding to 16 bytes, deterministic SIV-XChaCha20-Poly1305, `~` + base64url. Listed paths are decrypted, and rows that don't decrypt (plaintext leftovers while Drive migrates, other keys) are skipped.
+- **Content:** goes through the chunked API, not v1 `PUT`/`GET`.
+  - Pieces of up to 4 MiB are each sealed `0x01 ‖ SIV(…)`, named by the SHA-256 of the sealed bytes. Then come `POST /api/v2/chunks/check`, `PUT /api/v2/chunks/{hash}` for the missing ones, and the commit `PUT /api/v2/files/{path}` with the plaintext size and the keyed file hash `HMAC(file-hash, SHA-256(plaintext))`.
+  - Downloads are manifest plus chunks, checked against size and hash before anything is written.
+  - No `mtime` is sent: it would be plaintext metadata, and Notes detects changes by hash and version.
+- **Conflicts:** versions, `If-Match` / `If-None-Match: *`, keep-both conflicts, moves and Drive's trash work exactly as in Phase 7.
+- **Hashes:** Drive's `sha256` is keyed on these accounts, so local hashes are mapped through the same key before they're compared.
+- **No `synced_id`.** Drive can't read frontmatter, so Notes keeps a map from Drive file id to note id in its sync state. A Markdown note's id comes from that map, from the same content at the same path, or from its frontmatter once downloaded (that download is reused by the run).
+- **Safety:**
+  - A changed account fingerprint stops syncing until the account is unlocked again.
+  - A chunk or manifest that doesn't decrypt or verify is reported and nothing is overwritten.
+  - Names Windows can't hold (`CON.md`, `a:b`…) are refused before upload, since Drive can't check names it can't read.
+  - Switching to or from encryption, or to a new key, resets the sync base, so the first run is an add-only merge.
+- **Tests:**
+  - **Vectors:** `testdata/e2ee/vectors.json` and `notes-vector.json` (Drive's vectors) are pinned in `e2ee.rs`.
+  - **End to end:** `e2ee_tests.rs` runs two devices against `e2ee_mock.rs`, an encrypted Drive that has no key, like the real one. It covers create, edit, conflict, move, delete, a racing write, backup mode, unlock and the fingerprint pin, and checks that no name, note text or note id reaches the server.
+  - **Interop:** `tools/e2ee-reference/nulldrive_e2ee.py` is Drive's independent reference client. Against `tools/mock_drive_e2ee.py` it reads everything the app writes, and the app reads what it writes.
+- **Try it:** `python3 tools/mock_drive_e2ee.py 8766 mytoken`, then use `http://127.0.0.1:8766` with passphrase `vector passphrase 123`.
 
 ---
 

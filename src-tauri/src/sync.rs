@@ -47,9 +47,26 @@ pub trait Remote {
     /// `Expect::Absent`: create only. `Version(v)`: replace only if still at v.
     fn put(&self, path: &str, data: &[u8], mtime_ms: i64, expect: &Expect) -> Result<(), DErr>;
     fn delete(&self, path: &str, version: i64) -> Result<(), DErr>;
-    fn mv(&self, from: &str, to: &str, version: i64) -> Result<(), DErr>;
+    /// Keeps Drive's file id. `Ok(Some(v))`: the file's new version, when
+    /// Drive says (later steps of the same run need it for `If-Match`).
+    fn mv(&self, from: &str, to: &str, version: i64) -> Result<Option<i64>, DErr>;
     /// ids.json is merged, not versioned: last writer wins on the file itself.
     fn put_any(&self, path: &str, data: &[u8]) -> Result<(), DErr>;
+    /// Drive's `sha256` for content whose SHA-256 is `plain_sha`. Identity on
+    /// a plain account; the keyed file hash on an encrypted one (Phase 8).
+    fn tag(&self, plain_sha: &str) -> String {
+        plain_sha.to_string()
+    }
+    /// Drive reads note ids from Markdown frontmatter (`synced_id`). Not on
+    /// an encrypted account: there Notes keeps its own drive id → note id map.
+    fn has_synced_id(&self) -> bool {
+        true
+    }
+    /// Rows the last `list` skipped because they don't decrypt (encrypted
+    /// accounts: plaintext leftovers while Drive migrates, or other keys).
+    fn undecryptable(&self) -> usize {
+        0
+    }
 }
 
 /* ======================= Null Drive over HTTP ======================= */
@@ -62,6 +79,13 @@ pub struct DriveRemote<'a> {
     pub drive: &'a crate::backup::Drive,
     /// "Null Notes/Work", no slashes at the ends
     pub folder: String,
+    pub skipped: std::cell::Cell<usize>,
+}
+
+impl<'a> DriveRemote<'a> {
+    pub fn new(drive: &'a crate::backup::Drive, folder: String) -> DriveRemote<'a> {
+        DriveRemote { drive, folder, skipped: std::cell::Cell::new(0) }
+    }
 }
 
 impl DriveRemote<'_> {
@@ -74,7 +98,28 @@ impl DriveRemote<'_> {
 }
 
 impl Remote for DriveRemote<'_> {
+    fn tag(&self, plain_sha: &str) -> String {
+        self.drive.tag(plain_sha)
+    }
+    fn has_synced_id(&self) -> bool {
+        !self.drive.encrypted()
+    }
+    fn undecryptable(&self) -> usize {
+        self.skipped.get()
+    }
+
     fn list(&self) -> Result<Vec<RFile>, DErr> {
+        if self.drive.encrypted() {
+            // encrypted ?prefix=, paths decrypted, undecryptable rows skipped
+            let (rows, skipped) = self.drive.list_rows(&self.folder)?;
+            self.skipped.set(skipped);
+            let pre = format!("{}/", self.folder);
+            return Ok(rows
+                .into_iter()
+                .filter(|r| !r.is_dir)
+                .filter_map(|r| Some(RFile { path: r.path.strip_prefix(&pre)?.to_string(), drive_id: r.id, version: r.version, sha: r.sha256, synced_id: None }))
+                .collect());
+        }
         let url = format!("/api/v1/files?prefix={}", crate::backup::enc_path(&self.folder));
         let v: serde_json::Value = self
             .drive
@@ -103,6 +148,9 @@ impl Remote for DriveRemote<'_> {
     }
 
     fn get(&self, rel: &str) -> Result<Vec<u8>, DErr> {
+        if self.drive.encrypted() {
+            return self.drive.download_encrypted(&self.full(rel));
+        }
         let url = self.files_url(rel);
         self.drive.retry_with(|| {
             let r = self.drive.req("GET", &url).call().map_err(|e| crate::backup::Drive::classify(e, rel))?;
@@ -119,6 +167,13 @@ impl Remote for DriveRemote<'_> {
     }
 
     fn put(&self, rel: &str, data: &[u8], mtime_ms: i64, expect: &Expect) -> Result<(), DErr> {
+        if self.drive.encrypted() {
+            let pre = match expect {
+                Expect::Absent => crate::backup::Precond::Absent,
+                Expect::Version(v) => crate::backup::Precond::Version(*v),
+            };
+            return self.drive.commit_encrypted(&self.full(rel), data, &pre);
+        }
         let url = self.files_url(rel);
         let sha = crate::backup::sha256_hex(data);
         self.drive.retry_with(|| {
@@ -135,6 +190,9 @@ impl Remote for DriveRemote<'_> {
     }
 
     fn put_any(&self, rel: &str, data: &[u8]) -> Result<(), DErr> {
+        if self.drive.encrypted() {
+            return self.drive.commit_encrypted(&self.full(rel), data, &crate::backup::Precond::Any);
+        }
         let url = self.files_url(rel);
         let sha = crate::backup::sha256_hex(data);
         self.drive.retry(rel, || {
@@ -143,7 +201,7 @@ impl Remote for DriveRemote<'_> {
     }
 
     fn delete(&self, rel: &str, version: i64) -> Result<(), DErr> {
-        let url = self.files_url(rel);
+        let url = if self.drive.encrypted() { format!("/api/v1/files/{}", self.drive.wire_url(&self.full(rel))?) } else { self.files_url(rel) };
         match self.drive.retry(rel, || self.drive.req("DELETE", &url).set("If-Match", &format!("\"{version}\"")).call()) {
             Ok(_) => Ok(()),
             // 404: already gone is fine; 409 conflict: edited on Drive since -> re-plan
@@ -154,11 +212,12 @@ impl Remote for DriveRemote<'_> {
         }
     }
 
-    fn mv(&self, from: &str, to: &str, version: i64) -> Result<(), DErr> {
-        let body = serde_json::json!({ "from": self.full(from), "to": self.full(to), "if_match": version });
-        self.drive
-            .retry(from, || self.drive.req("POST", "/api/v1/files/move").set("If-Match", &format!("\"{version}\"")).send_json(body.clone()))
-            .map(|_| ())
+    fn mv(&self, from: &str, to: &str, version: i64) -> Result<Option<i64>, DErr> {
+        let body = serde_json::json!({ "from": self.drive.wire(&self.full(from))?, "to": self.drive.wire(&self.full(to))?, "if_match": version });
+        let r = self.drive.retry(from, || self.drive.req("POST", "/api/v1/files/move").set("If-Match", &format!("\"{version}\"")).send_json(body.clone()))?;
+        // {"version": v} and/or {"moved": [{"file": {…, "version": v}}]}
+        let v: serde_json::Value = r.into_json().unwrap_or_default();
+        Ok(v.pointer("/moved/0/file/version").and_then(|x| x.as_i64()).or_else(|| v.get("version").and_then(|x| x.as_i64())))
     }
 }
 
@@ -183,6 +242,13 @@ pub struct SyncState {
     pub base: Vec<BItem>,
     #[serde(default)]
     pub cache: BTreeMap<String, Cached>,
+    /// fingerprint of the encryption key the base was made with ("" = plain)
+    #[serde(default)]
+    pub e2ee: String,
+    /// Encrypted accounts have no `synced_id`: Drive file id → note id, from
+    /// what this device uploaded, matched or downloaded.
+    #[serde(default)]
+    pub note_ids: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize)]
@@ -331,6 +397,50 @@ fn reattach_ids(v: &Vault, litems: &mut [LItem], base: &[BItem]) {
     }
 }
 
+/* ======================= encrypted accounts (Phase 8) ======================= */
+
+/// Local hashes as Drive reports them (keyed on an encrypted account), so
+/// local, base and Drive hashes are all comparable.
+fn tagged(remote: &dyn Remote, mut items: Vec<LItem>) -> Vec<LItem> {
+    for l in items.iter_mut() {
+        l.sha = remote.tag(&l.sha);
+    }
+    items
+}
+
+/// No `synced_id` on an encrypted account: find each Markdown note's id
+/// from (1) what this device knows about that Drive file id, (2) the same
+/// content at the same path here, or (3) its frontmatter, after a download
+/// that the run needs anyway (kept in `prefetch` and used by the plan).
+fn fill_note_ids(remote: &dyn Remote, files: &mut [RFile], litems: &[LItem], known: &mut BTreeMap<String, String>, mut prefetch: Option<&mut HashMap<String, Vec<u8>>>, problems: &mut Vec<String>) -> Result<(), DErr> {
+    for f in files.iter_mut().filter(|f| noteid::is_md(&f.path) && f.synced_id.is_none()) {
+        if let Some(id) = known.get(&f.drive_id) {
+            f.synced_id = Some(id.clone());
+            continue;
+        }
+        if let Some(id) = litems.iter().find(|l| l.path == f.path && l.sha == f.sha).and_then(|l| l.note_id.clone()) {
+            known.insert(f.drive_id.clone(), id.clone());
+            f.synced_id = Some(id);
+            continue;
+        }
+        let Some(pf) = prefetch.as_deref_mut() else { continue };
+        match remote.get(&f.path) {
+            Ok(data) => {
+                if let Some(id) = noteid::get_id(&String::from_utf8_lossy(&data)).map(|s| s.to_lowercase()) {
+                    known.insert(f.drive_id.clone(), id.clone());
+                    f.synced_id = Some(id);
+                }
+                pf.insert(f.path.clone(), data);
+            }
+            // undecryptable or gone: leave it to the plan (by Drive id / path)
+            Err(DErr::File(m)) => problems.push(m),
+            Err(DErr::Precondition(_)) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
 /* ======================= one sync run ======================= */
 
 pub fn conflict_name_for(v: &Vault) -> impl Fn(&str, &HashSet<String>) -> String + '_ {
@@ -356,11 +466,34 @@ pub fn run_sync(root: &Path, remote: &dyn Remote, st: &mut SyncState, allow_mass
     let v = Vault::open(root.to_path_buf()).map_err(|_| DErr::Other(format!("The vault folder {} isn't there (unplugged drive?). Nothing was synced.", root.display())))?;
     let mut rep = SyncReport::default();
 
-    let rfiles = remote.list()?;
+    let mut rfiles = remote.list()?;
+    if remote.undecryptable() > 0 {
+        let n = remote.undecryptable();
+        rep.problems.push(format!("{n} file{} in the Drive folder couldn't be decrypted with this account's key and {} left alone (files not yet encrypted by Drive, or encrypted with other keys).", if n == 1 { "" } else { "s" }, if n == 1 { "was" } else { "were" }));
+    }
     let rids = remote_ids(remote, &rfiles)?;
-    let ritems = to_items(&rfiles, &rids);
-    let mut litems = scan_local(root, &mut st.cache).map_err(DErr::Other)?;
+    let mut litems = tagged(remote, scan_local(root, &mut st.cache).map_err(DErr::Other)?);
     reattach_ids(&v, &mut litems, &st.base);
+    let mut prefetch: HashMap<String, Vec<u8>> = HashMap::new();
+    if !remote.has_synced_id() {
+        fill_note_ids(remote, &mut rfiles, &litems, &mut st.note_ids, Some(&mut prefetch), &mut rep.problems)?;
+    }
+    let ritems = to_items(&rfiles, &rids);
+    // Drive's bytes: what fill_note_ids already downloaded, else fetch now.
+    // A file that can't be decrypted is reported and left alone.
+    let mut fetch = |rp: &str, rep: &mut SyncReport| -> Result<Option<Vec<u8>>, DErr> {
+        if let Some(d) = prefetch.remove(rp) {
+            return Ok(Some(d));
+        }
+        match remote.get(rp) {
+            Ok(d) => Ok(Some(d)),
+            Err(DErr::File(m)) => {
+                rep.problems.push(m);
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    };
 
     let cname = conflict_name_for(&v);
     let plan = syncplan::plan(&litems, &ritems, &st.base, &cname, allow_mass_delete);
@@ -368,6 +501,15 @@ pub fn run_sync(root: &Path, remote: &dyn Remote, st: &mut SyncState, allow_mass
     let lsha: HashMap<&str, &str> = litems.iter().map(|l| (l.path.as_str(), l.sha.as_str())).collect();
     let rmap: HashMap<&str, &RItem> = ritems.iter().map(|r| (r.path.as_str(), r)).collect();
 
+    // A Drive move gives the file a new version; later steps of this run
+    // that expected the old one (an upload after a rename) use the new one.
+    let mut bumped: HashMap<String, (i64, i64)> = HashMap::new();
+    let fresh = |bumped: &HashMap<String, (i64, i64)>, path: &str, e: &Expect| -> Expect {
+        match (e, bumped.get(path)) {
+            (Expect::Version(v), Some((old, new))) if v == old => Expect::Version(*new),
+            _ => e.clone(),
+        }
+    };
     for act in &plan.acts {
         match act {
             Act::MoveLocal { from, to } => {
@@ -391,14 +533,19 @@ pub fn run_sync(root: &Path, remote: &dyn Remote, st: &mut SyncState, allow_mass
                 }
             }
             Act::MoveRemote { from, to, version } => match remote.mv(from, to, *version) {
-                Ok(()) => rep.moved.push(format!("{from} → {to} (Drive)")),
+                Ok(newv) => {
+                    if let Some(n) = newv {
+                        bumped.insert(to.clone(), (*version, n));
+                    }
+                    rep.moved.push(format!("{from} → {to} (Drive)"));
+                }
                 Err(DErr::Precondition(_)) => rep.retry = true,
                 Err(e @ (DErr::File(_) | DErr::Other(_))) => rep.problems.push(e.user_message()),
                 Err(e) => return Err(e),
             },
             Act::DeleteLocal { path, sha } => {
                 let abs = v.abs(path);
-                if sha_now(&abs).as_deref() != Some(sha.as_str()) {
+                if sha_now(&abs).map(|s| remote.tag(&s)).as_deref() != Some(sha.as_str()) {
                     rep.retry = true; // edited since the scan: keep it
                     continue;
                 }
@@ -412,20 +559,20 @@ pub fn run_sync(root: &Path, remote: &dyn Remote, st: &mut SyncState, allow_mass
                     Err(e) => rep.problems.push(format!("{path}: deleted on Drive, but couldn't move it to the Recycle Bin here ({e})")),
                 }
             }
-            Act::DeleteRemote { path, version } => match remote.delete(path, *version) {
+            Act::DeleteRemote { path, version } => match remote.delete(path, match fresh(&bumped, path, &Expect::Version(*version)) { Expect::Version(v) => v, Expect::Absent => *version }) {
                 Ok(()) => rep.deleted_remote.push(path.clone()),
                 Err(DErr::Precondition(_)) => rep.retry = true,
                 Err(e @ (DErr::File(_) | DErr::Other(_))) => rep.problems.push(e.user_message()),
                 Err(e) => return Err(e),
             },
             Act::ConflictCopy { remote: rp, copy, .. } => {
-                let data = remote.get(rp)?;
+                let Some(data) = fetch(rp, &mut rep)? else { continue };
                 make_conflict_copy(&v, copy, &data, remote, &mut rep)?;
             }
             Act::Download { remote: rp, local, expect_local, .. } => {
-                let data = remote.get(rp)?;
+                let Some(data) = fetch(rp, &mut rep)? else { continue };
                 let abs = v.abs(local);
-                let now = if abs.exists() { sha_now(&abs) } else { None };
+                let now = if abs.exists() { sha_now(&abs).map(|s| remote.tag(&s)) } else { None };
                 if now != *expect_local {
                     // changed (or created) here since the scan: keep both
                     let copy = cname(local, &HashSet::new());
@@ -445,11 +592,12 @@ pub fn run_sync(root: &Path, remote: &dyn Remote, st: &mut SyncState, allow_mass
                 let abs = v.abs(local);
                 let Ok(data) = fs::read(&abs) else { continue };
                 // the plan was made from this content; if it changed, just retry
-                if lsha.get(local.as_str()).map(|s| *s != crate::backup::sha256_hex(&data)).unwrap_or(false) && rmap.contains_key(local.as_str()) {
+                if lsha.get(local.as_str()).map(|s| *s != remote.tag(&crate::backup::sha256_hex(&data))).unwrap_or(false) && rmap.contains_key(local.as_str()) {
                     rep.retry = true;
                 }
                 let mtime = fs::metadata(&abs).map(|m| mtime_ms(&m)).unwrap_or(0);
-                match remote.put(rp, &data, mtime, expect) {
+                let expect = fresh(&bumped, rp, expect);
+                match remote.put(rp, &data, mtime, &expect) {
                     Ok(()) => rep.uploaded.push(rp.clone()),
                     Err(DErr::Precondition(_)) => rep.retry = true,
                     Err(e @ (DErr::File(_) | DErr::Other(_))) => rep.problems.push(e.user_message()),
@@ -467,7 +615,7 @@ pub fn run_sync(root: &Path, remote: &dyn Remote, st: &mut SyncState, allow_mass
     }
 
     // ids.json: merge both maps (local wins), keep paths that exist somewhere
-    let after_r = remote.list()?;
+    let mut after_r = remote.list()?;
     let after_l = scan_local(root, &mut st.cache).map_err(DErr::Other)?;
     {
         let _g = noteid::IDS_LOCK.lock().unwrap();
@@ -494,8 +642,12 @@ pub fn run_sync(root: &Path, remote: &dyn Remote, st: &mut SyncState, allow_mass
     // New base: what is now the same on both sides. Keys seen on one side
     // only keep their old base entry, so deletes are still recognised later.
     let rids2 = remote_ids(remote, &after_r)?;
+    let litems2 = tagged(remote, scan_local(root, &mut st.cache).map_err(DErr::Other)?);
+    if !remote.has_synced_id() {
+        let mut ignore = Vec::new();
+        fill_note_ids(remote, &mut after_r, &litems2, &mut st.note_ids, None, &mut ignore)?;
+    }
     let ritems2 = to_items(&after_r, &rids2);
-    let litems2 = scan_local(root, &mut st.cache).map_err(DErr::Other)?;
     let (lk, rk) = syncplan::keys(&litems2, &ritems2, &st.base);
     let mut base = Vec::new();
     for (k, l) in &lk {
@@ -513,6 +665,14 @@ pub fn run_sync(root: &Path, remote: &dyn Remote, st: &mut SyncState, allow_mass
         if let Some(old) = st.base.iter().find(|b| &b.key == k) {
             base.push(old.clone());
         }
+    }
+    if !remote.has_synced_id() {
+        // remember which Drive file is which note; forget files Drive no longer has
+        for b in base.iter().filter(|b| b.key.starts_with("n:")) {
+            st.note_ids.insert(b.drive_id.clone(), b.key[2..].to_string());
+        }
+        let live: HashSet<&str> = after_r.iter().map(|r| r.drive_id.as_str()).collect();
+        st.note_ids.retain(|id, _| live.contains(id.as_str()));
     }
     st.base = base;
     rep.problems.truncate(50);
@@ -615,7 +775,7 @@ pub mod mem {
                 None => Ok(()),
             }
         }
-        fn mv(&self, from: &str, to: &str, version: i64) -> Result<(), DErr> {
+        fn mv(&self, from: &str, to: &str, version: i64) -> Result<Option<i64>, DErr> {
             self.hook();
             let v = self.bump();
             let mut g = self.files.lock().unwrap();
@@ -624,7 +784,7 @@ pub mod mem {
                     let mut f = g.remove(from).unwrap();
                     f.version = v; // same id, new version
                     g.insert(to.into(), f);
-                    Ok(())
+                    Ok(Some(v))
                 }
                 _ => Err(DErr::Precondition(from.into())),
             }
@@ -1030,7 +1190,7 @@ mod http_tests {
             Dev { root, st: SyncState::default(), drive }
         }
         fn sync(&mut self) -> SyncReport {
-            let r = DriveRemote { drive: &self.drive, folder: FOLDER.into() };
+            let r = DriveRemote::new(&self.drive, FOLDER.into());
             let mut out = run_sync(&self.root, &r, &mut self.st, false).unwrap();
             for _ in 0..3 {
                 if !out.retry { break; }
