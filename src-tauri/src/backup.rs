@@ -587,7 +587,8 @@ impl Drive {
                 req = match pre {
                     Precond::Any => req.set("If-Match", "*"),
                     Precond::Absent => req.set("If-None-Match", "*"),
-                    Precond::Version(v) => req.set("If-Match", &format!("\"{v}\"")),
+                    // bare, exactly as notes-e2ee-drive-api.md §4.2 and Drive's reference client send it
+                    Precond::Version(v) => req.set("If-Match", &v.to_string()),
                 };
                 match req.send_json(body.clone()) {
                     Ok(_) => Ok(None),
