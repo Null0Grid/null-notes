@@ -300,9 +300,9 @@ textarea::selection{background:rgba(0,229,255,.25)}
 .fsum{font-family:var(--f-mono);font-size:11px;color:var(--faint);letter-spacing:.04em}
 .fresults{flex:1;overflow:auto;padding:6px 0 20px}
 .fgroup{margin-bottom:6px}
-.fgroup>button{display:flex;justify-content:space-between;gap:8px;width:100%;background:none;border:0;padding:5px 12px;font-family:var(--f-mono);font-size:12px;color:var(--cyan);cursor:pointer;text-align:left}
-.fgroup>button span{color:var(--faint);flex:none}
-.fgroup>button:hover{background:var(--panel2)}
+.fgroup>button:not(.fhit){display:flex;justify-content:space-between;gap:8px;width:100%;background:none;border:0;padding:5px 12px;font-family:var(--f-mono);font-size:12px;color:var(--cyan);cursor:pointer;text-align:left}
+.fgroup>button:not(.fhit) span{color:var(--faint);flex:none}
+.fgroup>button:not(.fhit):hover{background:var(--panel2)}
 .fhit{display:block;width:100%;text-align:left;background:none;border:0;border-left:2px solid transparent;padding:4px 12px 4px 20px;font-size:12px;color:var(--dim);cursor:pointer;line-height:1.45;word-break:break-word}
 .fhit:hover{background:var(--panel2);border-left-color:var(--cyan);color:var(--fg)}
 .fhit mark{background:rgba(255,46,136,.22);color:var(--fg);border-radius:2px;padding:0 1px}
