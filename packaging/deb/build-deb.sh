@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Build the Null Notes .deb (amd64) on Ubuntu 24.04+ / Debian 13+.
+# Build the Null Notes .deb (amd64). It runs on distros with a glibc at least
+# as new as the build machine's (the release workflow builds on Ubuntu 22.04).
 #
 #   packaging/deb/build-deb.sh
 #
 # Needs: Rust, libwebkit2gtk-4.1-dev, libssl-dev, dpkg-deb.
-# The binary links glibc 2.39, so build on the oldest distro you want to support.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
@@ -45,13 +45,15 @@ Copyright NULLGRID. All rights reserved.
 EOF
 
 size="$(du -sk "$R/usr" | cut -f1)"
+# the glibc this binary actually needs (it depends on the distro it was built on)
+glibc="$(objdump -T "$R/usr/bin/null-notes" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1 | cut -d_ -f2)"
 cat > "$R/DEBIAN/control" <<EOF
 Package: null-notes
 Version: $V
 Architecture: amd64
 Maintainer: NULLGRID <luc.honz@proton.me>
 Installed-Size: $size
-Depends: libc6 (>= 2.39), libwebkit2gtk-4.1-0, libjavascriptcoregtk-4.1-0, libsoup-3.0-0, libgtk-3-0t64 | libgtk-3-0, libglib2.0-0t64 | libglib2.0-0, libssl3t64 | libssl3, libdbus-1-3
+Depends: libc6 (>= $glibc), libwebkit2gtk-4.1-0, libjavascriptcoregtk-4.1-0, libsoup-3.0-0, libgtk-3-0t64 | libgtk-3-0, libglib2.0-0t64 | libglib2.0-0, libssl3t64 | libssl3, libdbus-1-3
 Section: editors
 Priority: optional
 Homepage: https://nullgrid.dev

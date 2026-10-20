@@ -3,7 +3,7 @@ name: Release
 # Push a tag that matches the app version (src-tauri/tauri.conf.json), with
 # or without a "v": v5.0.1 or 5.0.1. Or, for a tag that already exists:
 # Actions → Release → Run workflow, and type the tag.
-# Builds the .deb, the Windows installers and the Microsoft Store package and
+# Builds the Linux packages (AppImage, .rpm, .tar.gz, .deb), the Windows installers and the Microsoft Store package and
 # attaches them to the release for that tag (an existing release keeps its
 # published/draft state; a new one is published).
 # The .msix is a workflow artifact only: it's unsigned and meant for Partner
@@ -41,30 +41,33 @@ jobs:
           if [ "$app" != "$tag" ]; then echo "::error::tag $TAG but tauri.conf.json says $app"; exit 1; fi
           echo "version=$app" >> "$GITHUB_OUTPUT"
 
-  deb:
-    name: Debian / Ubuntu package
+  linux:
+    name: Linux packages (AppImage, .rpm, .tar.gz, .deb)
     needs: version
-    runs-on: ubuntu-24.04   # the .deb needs glibc 2.39+: build on the oldest distro you support
+    runs-on: ubuntu-22.04   # glibc 2.35: the oldest distro the packages support
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.TAG }}
       - run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libssl-dev build-essential
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libssl-dev build-essential \
+            librsvg2-dev patchelf file rpm
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+      - name: Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
       - name: Test
         working-directory: src-tauri
         run: cargo test --lib
-      - name: Build .deb
-        run: packaging/deb/build-deb.sh
+      - name: Build packages
+        run: packaging/linux/build-linux.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: deb
-          path: packaging/deb/*.deb
+          name: linux
+          path: packaging/linux/dist/*
 
   windows:
     name: Windows installers + Store package
@@ -102,7 +105,7 @@ jobs:
 
   release:
     name: Attach to the GitHub release
-    needs: [version, deb, windows]
+    needs: [version, linux, windows]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
@@ -114,11 +117,15 @@ jobs:
           append_body: true
           name: Null Notes ${{ needs.version.outputs.version }}
           files: |
-            dist/deb/*.deb
+            dist/linux/*
             dist/windows/nsis/*.exe
             dist/windows/msi/*.msi
           body: |
             **Windows:** the `-setup.exe` installer (or the Microsoft Store).
-            **Ubuntu 24.04+ / Debian 13+:** `sudo apt install ./null-notes_${{ needs.version.outputs.version }}_amd64.deb`
+            **Linux** (any distro from 2022 on: glibc 2.35+ and WebKitGTK 4.1):
+            - **Any distro, no install:** the `.AppImage`. `chmod +x` it and run it.
+            - **Ubuntu 22.04+ / Debian 12+ / Mint:** `sudo apt install ./null-notes_${{ needs.version.outputs.version }}_amd64.deb`
+            - **Fedora / openSUSE / RHEL 9+:** `sudo dnf install ./null-notes-${{ needs.version.outputs.version }}-1.x86_64.rpm` (openSUSE: `sudo zypper install ./…rpm`)
+            - **Anything else:** the `.tar.gz`. Unpack it and run `./null-notes`, or `./install.sh` to add it to your app menu.
 
             The Microsoft Store package is in this run's `store-package` artifact (upload it in Partner Center).

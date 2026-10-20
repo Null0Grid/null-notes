@@ -10,3 +10,7 @@ packaging/msix/stage/
 packaging/msix/stage/
 packaging/deb/null-notes_*/
 __pycache__/
+packaging/linux/dist/
+packaging/linux/stage/
+*.AppImage
+*.rpm
