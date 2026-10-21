@@ -35,10 +35,10 @@ Null Notes is a local-first Markdown notes app for Windows and Linux. A vault is
 
   | Distro | File | How |
   |---|---|---|
-  | Any, without installing | `Null-Notes-5.0.0-x86_64.AppImage` | `chmod +x Null-Notes-*.AppImage`, then run it |
-  | Ubuntu 22.04+, Debian 12+, Mint | `null-notes_5.0.0_amd64.deb` | `sudo apt install ./null-notes_5.0.0_amd64.deb` |
-  | Fedora, RHEL 9+, openSUSE | `null-notes-5.0.0-1.x86_64.rpm` | `sudo dnf install ./null-notes-5.0.0-1.x86_64.rpm` (openSUSE: `sudo zypper install ./…`) |
-  | Anything else (Arch, …) | `null-notes-5.0.0-linux-x86_64.tar.gz` | unpack, then `./null-notes`, or `./install.sh` to add it to your app menu (no sudo) |
+  | Any, without installing | `Null-Notes-5.1.0-x86_64.AppImage` | `chmod +x Null-Notes-*.AppImage`, then run it |
+  | Ubuntu 22.04+, Debian 12+, Mint | `null-notes_5.1.0_amd64.deb` | `sudo apt install ./null-notes_5.1.0_amd64.deb` |
+  | Fedora, RHEL 9+, openSUSE | `null-notes-5.1.0-1.x86_64.rpm` | `sudo dnf install ./null-notes-5.1.0-1.x86_64.rpm` (openSUSE: `sudo zypper install ./…`) |
+  | Anything else (Arch, …) | `null-notes-5.1.0-linux-x86_64.tar.gz` | unpack, then `./null-notes`, or `./install.sh` to add it to your app menu (no sudo) |
 
 ## Sync with Null Drive
 
