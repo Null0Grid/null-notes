@@ -125,19 +125,24 @@ jobs:
         run: |
           case "${{ matrix.kind }}" in
             deb) apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y ./dist/*.deb ;;
-            rpm) dnf install -y ./dist/*.rpm ;;
-            zypper) zypper --non-interactive install --allow-unsigned-rpm ./dist/*.rpm ;;
+            rpm) dnf install -y ./dist/*.rpm tar gzip ;;
+            zypper) zypper --non-interactive install --allow-unsigned-rpm ./dist/*.rpm tar gzip ;;
           esac
       - name: All libraries found
         run: |
-          ldd /usr/bin/null-notes
-          ! ldd /usr/bin/null-notes | grep "not found"
-          test -f /usr/share/applications/*.desktop
-          grep -h "x-scheme-handler/nullnotes" /usr/share/applications/*.desktop
+          ldd /usr/bin/null-notes > ldd.txt
+          missing=$(grep "not found" ldd.txt || true)
+          [ -z "$missing" ] || { echo "::error::libraries not found: $missing"; exit 1; }
+          entry=$(grep -l "^Exec=null-notes" /usr/share/applications/*.desktop || true)
+          [ -n "$entry" ] || { echo "::error::no Null Notes desktop entry"; exit 1; }
+          grep -q "x-scheme-handler/nullnotes" "$entry" || { echo "::error::$entry doesn't handle nullnotes://"; exit 1; }
+          echo "desktop entry: $entry"
       - name: tar.gz runs here too
         run: |
           mkdir t && tar -xzf dist/*.tar.gz -C t
-          ! ldd t/*/null-notes | grep "not found"
+          ldd t/*/null-notes > ldd-tar.txt
+          missing=$(grep "not found" ldd-tar.txt || true)
+          [ -z "$missing" ] || { echo "::error::tar.gz: libraries not found: $missing"; exit 1; }
 
   flatpak-sources:
     name: Flatpak crate list
