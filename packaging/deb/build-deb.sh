@@ -52,7 +52,7 @@ cat > "$R/DEBIAN/control" <<EOF
 Package: null-notes
 Version: $V
 Architecture: $A
-Maintainer: NULLGRID <luc.honz@proton.me>
+Maintainer: NULLGRID <volosteele55@proton.me>
 Installed-Size: $size
 Depends: libc6 (>= $glibc), libwebkit2gtk-4.1-0, libjavascriptcoregtk-4.1-0, libsoup-3.0-0, libgtk-3-0t64 | libgtk-3-0, libglib2.0-0t64 | libglib2.0-0, libssl3t64 | libssl3, libdbus-1-3
 Section: editors

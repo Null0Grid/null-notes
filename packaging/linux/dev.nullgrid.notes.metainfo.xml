@@ -2,6 +2,7 @@
 <component type="desktop-application">
   <id>dev.nullgrid.notes</id>
   <metadata_license>CC0-1.0</metadata_license>
+  <update_contact>volosteele55@proton.me</update_contact>
   <project_license>LicenseRef-proprietary</project_license>
   <name>Null Notes</name>
   <summary>Your notes as plain files: linked, searchable, encrypted, synced</summary>

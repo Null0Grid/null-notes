@@ -15,4 +15,4 @@
 
 ## Reporting a vulnerability
 
-Please don't open a public issue. Email **luc.honz@proton.me** with the steps to reproduce, and you'll get an answer within a few days.
+Please don't open a public issue. Email **volosteele55@proton.me** with the steps to reproduce, and you'll get an answer within a few days.
