@@ -1,6 +1,6 @@
-# Null Notes: technical history (v5.1.0)
+# Null Notes: technical history (v5.1.1)
 
-5.1.0 adds Linux AppImage, .rpm and .tar.gz packages, and builds every Linux package on Ubuntu 22.04 (glibc 2.35+). 5.0.0 adds backup and two-way sync into end-to-end encrypted Null Drive accounts (Phase 8). 0.7.0 added two-way sync with Null Drive (Phase 7). 0.6.0 added an opt-in backup to Null Drive (Phase 6). 0.5.0 added `nullnotes://` links (Phase 5). 0.4.0 added Phase 1 of cross-product search (see the Null Grid search contract v1). The rest of this file describes the 0.3.1 recovery.
+5.1.1 adds ARM64 builds of every Linux package, plus Flatpak, Snap and an AUR package. 5.1.0 added Linux AppImage, .rpm and .tar.gz packages, and builds every Linux package on Ubuntu 22.04 (glibc 2.35+). 5.0.0 adds backup and two-way sync into end-to-end encrypted Null Drive accounts (Phase 8). 0.7.0 added two-way sync with Null Drive (Phase 7). 0.6.0 added an opt-in backup to Null Drive (Phase 6). 0.5.0 added `nullnotes://` links (Phase 5). 0.4.0 added Phase 1 of cross-product search (see the Null Grid search contract v1). The rest of this file describes the 0.3.1 recovery.
 
 ## Phase 1: search agent
 

@@ -31,17 +31,17 @@ Null Notes is a local-first Markdown notes app for Windows and Linux. A vault is
 ## Install
 
 - **Windows:** [Microsoft Store](https://apps.microsoft.com/detail/9NW82T0G35QF), or the installer from [Releases](../../releases).
-- **Linux:** download from [Releases](../../releases), for **x86_64** or **ARM64** (`aarch64`/`arm64` in the file name). Every package works on distros from 2022 on (glibc 2.35+, WebKitGTK 4.1).
+- **Linux:** download from [Releases](../../releases), for **x86_64** or **ARM64** (`aarch64`/`arm64` in the file name). Every package works on distros from 2022 on (glibc 2.35+, WebKitGTK 4.1). RHEL, Rocky and Alma don't ship WebKitGTK 4.1, so use the Flatpak there.
 
   | Distro | File | How |
   |---|---|---|
-  | Any, without installing | `Null-Notes-5.1.0-x86_64.AppImage` | `chmod +x Null-Notes-*.AppImage`, then run it |
-  | Any, sandboxed | `null-notes-5.1.0-x86_64.flatpak` | `flatpak install ./null-notes-5.1.0-x86_64.flatpak` (needs the [Flathub remote](https://flathub.org/setup)) |
-  | Any with snapd | `null-notes_5.1.0_amd64.snap` | `sudo snap install --dangerous ./null-notes_5.1.0_amd64.snap` |
-  | Ubuntu 22.04+, Debian 12+, Mint, Raspberry Pi OS | `null-notes_5.1.0_amd64.deb` | `sudo apt install ./null-notes_5.1.0_amd64.deb` |
-  | Fedora, openSUSE | `null-notes-5.1.0-1.x86_64.rpm` | `sudo dnf install ./null-notes-5.1.0-1.x86_64.rpm` (openSUSE: `sudo zypper install ./…`) |
+  | Any, without installing | `Null-Notes-5.1.1-x86_64.AppImage` | `chmod +x Null-Notes-*.AppImage`, then run it |
+  | Any, sandboxed; also RHEL, Rocky, Alma | `null-notes-5.1.1-x86_64.flatpak` | `flatpak install ./null-notes-5.1.1-x86_64.flatpak` (needs the [Flathub remote](https://flathub.org/setup)) |
+  | Any with snapd | `null-notes_5.1.1_amd64.snap` | `sudo snap install --dangerous ./null-notes_5.1.1_amd64.snap` |
+  | Ubuntu 22.04+, Debian 12+, Mint, Raspberry Pi OS | `null-notes_5.1.1_amd64.deb` | `sudo apt install ./null-notes_5.1.1_amd64.deb` |
+  | Fedora, openSUSE | `null-notes-5.1.1-1.x86_64.rpm` | `sudo dnf install ./null-notes-5.1.1-1.x86_64.rpm` (openSUSE: `sudo zypper install ./…`) |
   | Arch, Manjaro, EndeavourOS | AUR: `null-notes-bin` | `yay -S null-notes-bin`, or build the attached `PKGBUILD` with `makepkg -si` |
-  | Anything else | `null-notes-5.1.0-linux-x86_64.tar.gz` | unpack, then `./null-notes`, or `./install.sh` to add it to your app menu (no sudo) |
+  | Anything else | `null-notes-5.1.1-linux-x86_64.tar.gz` | unpack, then `./null-notes`, or `./install.sh` to add it to your app menu (no sudo) |
 
   Check a download with `sha256sum -c SHA256SUMS --ignore-missing`.
 

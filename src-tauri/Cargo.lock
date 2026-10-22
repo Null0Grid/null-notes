@@ -2459,7 +2459,7 @@ dependencies = [
 
 [[package]]
 name = "null-notes"
-version = "5.1.0"
+version = "5.1.1"
 dependencies = [
  "argon2",
  "base64 0.22.1",

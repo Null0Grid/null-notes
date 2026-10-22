@@ -18,5 +18,6 @@ Needs: glibc 2.35 or newer, and WebKitGTK 4.1 (most desktops already have it):
     Fedora:          sudo dnf install webkit2gtk4.1
     openSUSE:        sudo zypper install libwebkit2gtk-4_1-0
     Arch:            sudo pacman -S webkit2gtk-4.1
+(RHEL, Rocky and Alma don't have it: use the Flatpak there.)
 
 More: https://github.com/Null0Grid/null-notes

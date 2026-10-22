@@ -129,7 +129,7 @@ jobs:
 
             **Linux**, for x86_64 and ARM64 (aarch64). Pick your machine's architecture; any distro from 2022 on (glibc 2.35+):
             - **Any distro, no install:** the `.AppImage`. `chmod +x` it and run it.
-            - **Flatpak:** `flatpak install ./null-notes-${{ needs.version.outputs.version }}-x86_64.flatpak` (needs the Flathub remote)
+            - **Flatpak** (also the way for RHEL, Rocky and Alma): `flatpak install ./null-notes-${{ needs.version.outputs.version }}-x86_64.flatpak` (needs the Flathub remote)
             - **Snap:** `sudo snap install --dangerous ./null-notes_${{ needs.version.outputs.version }}_amd64.snap`
             - **Ubuntu 22.04+ / Debian 12+ / Mint / Raspberry Pi OS:** `sudo apt install ./null-notes_${{ needs.version.outputs.version }}_amd64.deb` (ARM: `_arm64.deb`)
             - **Fedora / openSUSE:** `sudo dnf install ./null-notes-${{ needs.version.outputs.version }}-1.x86_64.rpm` (openSUSE: `sudo zypper install ./…rpm`; ARM: `.aarch64.rpm`)
