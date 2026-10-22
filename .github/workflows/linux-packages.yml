@@ -110,7 +110,8 @@ jobs:
           - { arch: x86_64, runner: ubuntu-24.04, image: "debian:12", kind: deb }
           - { arch: x86_64, runner: ubuntu-24.04, image: "fedora:latest", kind: rpm }
           - { arch: x86_64, runner: ubuntu-24.04, image: "opensuse/tumbleweed", kind: zypper }
-          - { arch: x86_64, runner: ubuntu-24.04, image: "rockylinux:9", kind: rpm }
+          - { arch: x86_64, runner: ubuntu-24.04, image: "rockylinux:9", kind: rpm-epel }
+          - { arch: x86_64, runner: ubuntu-24.04, image: "rockylinux/rockylinux:10", kind: rpm }
           - { arch: aarch64, runner: ubuntu-24.04-arm, image: "ubuntu:22.04", kind: deb }
           - { arch: aarch64, runner: ubuntu-24.04-arm, image: "debian:12", kind: deb }
           - { arch: aarch64, runner: ubuntu-24.04-arm, image: "fedora:latest", kind: rpm }
@@ -126,6 +127,8 @@ jobs:
           case "${{ matrix.kind }}" in
             deb) apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y ./dist/*.deb ;;
             rpm) dnf install -y ./dist/*.rpm tar gzip ;;
+            rpm-epel) dnf install -y epel-release dnf-plugins-core && dnf config-manager --set-enabled crb \
+                        && dnf install -y ./dist/*.rpm tar gzip ;;
             zypper) zypper --non-interactive install --allow-unsigned-rpm ./dist/*.rpm tar gzip ;;
           esac
       - name: All libraries found
