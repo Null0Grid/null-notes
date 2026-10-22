@@ -31,14 +31,19 @@ Null Notes is a local-first Markdown notes app for Windows and Linux. A vault is
 ## Install
 
 - **Windows:** [Microsoft Store](https://apps.microsoft.com/detail/9NW82T0G35QF), or the installer from [Releases](../../releases).
-- **Linux:** download from [Releases](../../releases). Every package works on distros from 2022 on (glibc 2.35+, WebKitGTK 4.1).
+- **Linux:** download from [Releases](../../releases), for **x86_64** or **ARM64** (`aarch64`/`arm64` in the file name). Every package works on distros from 2022 on (glibc 2.35+, WebKitGTK 4.1).
 
   | Distro | File | How |
   |---|---|---|
   | Any, without installing | `Null-Notes-5.1.0-x86_64.AppImage` | `chmod +x Null-Notes-*.AppImage`, then run it |
-  | Ubuntu 22.04+, Debian 12+, Mint | `null-notes_5.1.0_amd64.deb` | `sudo apt install ./null-notes_5.1.0_amd64.deb` |
-  | Fedora, RHEL 9+, openSUSE | `null-notes-5.1.0-1.x86_64.rpm` | `sudo dnf install ./null-notes-5.1.0-1.x86_64.rpm` (openSUSE: `sudo zypper install ./…`) |
-  | Anything else (Arch, …) | `null-notes-5.1.0-linux-x86_64.tar.gz` | unpack, then `./null-notes`, or `./install.sh` to add it to your app menu (no sudo) |
+  | Any, sandboxed | `null-notes-5.1.0-x86_64.flatpak` | `flatpak install ./null-notes-5.1.0-x86_64.flatpak` (needs the [Flathub remote](https://flathub.org/setup)) |
+  | Any with snapd | `null-notes_5.1.0_amd64.snap` | `sudo snap install --dangerous ./null-notes_5.1.0_amd64.snap` |
+  | Ubuntu 22.04+, Debian 12+, Mint, Raspberry Pi OS | `null-notes_5.1.0_amd64.deb` | `sudo apt install ./null-notes_5.1.0_amd64.deb` |
+  | Fedora, openSUSE | `null-notes-5.1.0-1.x86_64.rpm` | `sudo dnf install ./null-notes-5.1.0-1.x86_64.rpm` (openSUSE: `sudo zypper install ./…`) |
+  | Arch, Manjaro, EndeavourOS | AUR: `null-notes-bin` | `yay -S null-notes-bin`, or build the attached `PKGBUILD` with `makepkg -si` |
+  | Anything else | `null-notes-5.1.0-linux-x86_64.tar.gz` | unpack, then `./null-notes`, or `./install.sh` to add it to your app menu (no sudo) |
+
+  Check a download with `sha256sum -c SHA256SUMS --ignore-missing`.
 
 ## Sync with Null Drive
 
@@ -66,7 +71,10 @@ cargo tauri build                     # Windows: NSIS + MSI installers
 ```
 
 **Packages:**
-- **Linux (AppImage, .rpm, .tar.gz, .deb):** `packaging/linux/build-linux.sh`. Build on the oldest distro you want to support: a binary needs a glibc at least as new as the build machine's.
+- **Linux (AppImage, .rpm, .tar.gz, .deb):** `packaging/linux/build-linux.sh`, on the architecture you're building for. Build on the oldest distro you want to support: a binary needs a glibc at least as new as the build machine's.
+- **Flatpak:** `packaging/flatpak/` (manifest `dev.nullgrid.notes.yml`; run `cargo-sources.sh` first).
+- **Snap:** `packaging/snap/snapcraft.yaml`, made from the .deb.
+- **AUR:** `packaging/aur/make-aur.sh` writes `PKGBUILD` and `.SRCINFO` from the release tarballs.
 - **Microsoft Store:**
   - on Windows, `packaging/msix/build-msix.ps1`;
   - or cross-built from Linux, `packaging/msix/build-msix-linux.sh`.
@@ -84,7 +92,7 @@ Pushing a tag like `5.0.1` or `v5.0.1` runs [the release workflow](.github/workf
 | `src/` | the frontend: editor, preview, canvas, graph, settings |
 | `src-tauri/src/` | the backend: vault and files, locked notes (`lock.rs`), note ids, search index + local agent (`index.rs`, `agent.rs`), links, Null Drive backup and sync (`backup.rs`, `sync.rs`, `syncplan.rs`), Drive end-to-end encryption (`e2ee.rs`) |
 | `src-tauri/testdata/e2ee/` | Null Drive's encryption test vectors |
-| `packaging/` | Linux packages (AppImage, .rpm, .tar.gz, .deb) and Microsoft Store (MSIX) |
+| `packaging/` | Linux packages (AppImage, .deb, .rpm, .tar.gz, Flatpak, Snap, AUR) and Microsoft Store (MSIX) |
 | `tools/` | Drive stand-ins for testing, and Drive's reference encryption client |
 | `docs/HISTORY.md` | how each feature works, phase by phase |
 | `docs/handoffs/` | handoff notes for the Null Grid apps |
