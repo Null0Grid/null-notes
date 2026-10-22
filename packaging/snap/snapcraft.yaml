@@ -62,6 +62,21 @@ parts:
     source: ../linux/dist
     stage-packages:
       - libwebkit2gtk-4.1-0
+    # Graphics drivers come from the gnome-42-2204 runtime snap. A second copy
+    # from stage-packages makes EGL load mismatched Mesa parts and crash.
+    prime:
+      - -usr/lib/*/libEGL*
+      - -usr/lib/*/libGL*
+      - -usr/lib/*/libGLX*
+      - -usr/lib/*/libGLdispatch*
+      - -usr/lib/*/libgbm*
+      - -usr/lib/*/libglapi*
+      - -usr/lib/*/libdrm*
+      - -usr/lib/*/dri
+      - -usr/lib/*/libvulkan*
+      - -usr/share/glvnd
+      - -usr/share/vulkan
+      - -usr/share/drirc.d
     override-build: |
       set -eu
       deb="$(ls "$SNAPCRAFT_PART_SRC"/null-notes_*_"$(dpkg --print-architecture)".deb | head -1)"
