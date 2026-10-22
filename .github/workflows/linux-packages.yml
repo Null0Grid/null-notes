@@ -52,6 +52,7 @@ jobs:
       - name: Build AppImage, .rpm, .tar.gz, .deb
         run: packaging/linux/build-linux.sh
       - name: Build .snap
+        timeout-minutes: 20   # the Snap Store sometimes stalls; fail instead of hanging
         run: |
           sudo snap install snapcraft --classic
           cd packaging/snap
@@ -82,6 +83,7 @@ jobs:
           rc=$?
           [ $rc = 124 ] || { echo "::error::AppImage exited with $rc: $(tail -c 1500 ai.log | sed ':a;N;$!ba;s/\n/%0A/g')"; exit 1; }
       - name: Install and launch the snap
+        timeout-minutes: 15
         run: |
           # a snap installed from a file doesn't pull in what it needs by itself
           sudo snap install core22 gtk-common-themes gnome-42-2204
