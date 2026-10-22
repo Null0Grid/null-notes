@@ -70,25 +70,34 @@ jobs:
           rpm -qp --qf '%{ARCH}\n' "null-notes-$v-1.${{ matrix.arch }}.rpm" | grep -qx "${{ matrix.arch }}"
           dpkg-deb -f "null-notes_${v}_$d.deb" Architecture | grep -qx "$d"
           file -L "Null-Notes-$v-${{ matrix.arch }}.AppImage"
-      - name: Launch the AppImage
-        run: |
-          cd packaging/linux/dist
-          set +e
-          APPIMAGE_EXTRACT_AND_RUN=1 timeout 20 xvfb-run -a ./Null-Notes-*.AppImage
-          rc=$?
-          [ $rc = 124 ] || { echo "::error::AppImage exited with $rc (should still be running)"; exit 1; }
-      - name: Install and launch the snap
-        run: |
-          sudo snap install --dangerous packaging/linux/dist/null-notes_*.snap
-          snap connections null-notes
-          set +e
-          timeout 30 xvfb-run -a snap run null-notes
-          rc=$?
-          [ $rc = 124 ] || { echo "::error::snap exited with $rc (should still be running)"; exit 1; }
       - uses: actions/upload-artifact@v4
         with:
           name: linux-${{ matrix.arch }}
           path: packaging/linux/dist/*
+      - name: Launch the AppImage
+        run: |
+          cd packaging/linux/dist
+          set +e
+          APPIMAGE_EXTRACT_AND_RUN=1 timeout 20 xvfb-run -a ./Null-Notes-*.AppImage > ai.log 2>&1
+          rc=$?
+          [ $rc = 124 ] || { echo "::error::AppImage exited with $rc: $(tail -c 1500 ai.log | sed ':a;N;$!ba;s/\n/%0A/g')"; exit 1; }
+      - name: Install and launch the snap
+        run: |
+          # a snap installed from a file doesn't pull in what it needs by itself
+          sudo snap install core22 gtk-common-themes gnome-42-2204
+          sudo snap install --dangerous packaging/linux/dist/null-notes_*.snap
+          for p in gnome-42-2204 gtk-3-themes icon-themes sound-themes; do
+            sudo snap connect "null-notes:$p" 2>/dev/null || true
+          done
+          snap connections null-notes
+          set +e
+          timeout 30 xvfb-run -a snap run null-notes > snap.log 2>&1
+          rc=$?
+          if [ $rc != 124 ]; then
+            echo "::error::snap exited with $rc (should still be running): $(tail -c 1500 snap.log | sed ':a;N;$!ba;s/\n/%0A/g')"
+            sudo journalctl --no-pager -n 40 | grep -iE "apparmor|denied|snap" | tail -20
+            exit 1
+          fi
 
   distros:
     name: Install on ${{ matrix.image }} (${{ matrix.arch }})
