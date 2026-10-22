@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the Null Notes .deb (amd64). It runs on distros with a glibc at least
+# Build the Null Notes .deb for this machine (amd64 or arm64). It runs on distros with a glibc at least
 # as new as the build machine's (the release workflow builds on Ubuntu 22.04).
 #
 #   packaging/deb/build-deb.sh
@@ -10,11 +10,12 @@ here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
 tauri="$root/src-tauri"
 V="$(python3 -c "import json;print(json.load(open('$tauri/tauri.conf.json'))['version'])")"
-echo "Null Notes $V"
+A="$(dpkg --print-architecture)"
+echo "Null Notes $V ($A)"
 
 ( cd "$tauri" && cargo build --release --features tauri/custom-protocol )
 
-R="$here/null-notes_${V}_amd64"
+R="$here/null-notes_${V}_${A}"
 rm -rf "$R"
 mkdir -p "$R/DEBIAN" "$R/usr/bin" "$R/usr/share/applications" "$R/usr/share/doc/null-notes"
 install -m755 "$tauri/target/release/null-notes" "$R/usr/bin/null-notes"
@@ -33,7 +34,7 @@ Comment=A local markdown vault for notes, pages and images
 Exec=null-notes %u
 Icon=null-notes
 Terminal=false
-Categories=Office;Utility;TextEditor;
+Categories=Office;
 Keywords=notes;markdown;vault;nullgrid;
 MimeType=x-scheme-handler/nullnotes;
 StartupWMClass=null-notes
@@ -50,7 +51,7 @@ glibc="$(objdump -T "$R/usr/bin/null-notes" | grep -o 'GLIBC_[0-9.]*' | sort -uV
 cat > "$R/DEBIAN/control" <<EOF
 Package: null-notes
 Version: $V
-Architecture: amd64
+Architecture: $A
 Maintainer: NULLGRID <luc.honz@proton.me>
 Installed-Size: $size
 Depends: libc6 (>= $glibc), libwebkit2gtk-4.1-0, libjavascriptcoregtk-4.1-0, libsoup-3.0-0, libgtk-3-0t64 | libgtk-3-0, libglib2.0-0t64 | libglib2.0-0, libssl3t64 | libssl3, libdbus-1-3
@@ -65,4 +66,4 @@ EOF
 
 dpkg-deb --root-owner-group --build "$R" >/dev/null
 rm -rf "$R"
-echo "Built $here/null-notes_${V}_amd64.deb"
+echo "Built $here/null-notes_${V}_${A}.deb"

@@ -1,5 +1,5 @@
-Null Notes @VERSION@ for Linux (x86_64)
-=======================================
+Null Notes @VERSION@ for Linux (@ARCH@)
+==========================================
 
 Run it straight from this folder:
 

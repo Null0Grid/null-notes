@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Null Notes
+GenericName=Notes
+Comment=A local markdown vault for notes, pages and images
+Exec=null-notes %u
+Icon=dev.nullgrid.notes
+Terminal=false
+Categories=Office;
+Keywords=notes;markdown;vault;nullgrid;
+MimeType=x-scheme-handler/nullnotes;
+StartupWMClass=null-notes

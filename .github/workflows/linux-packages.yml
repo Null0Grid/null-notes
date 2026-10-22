@@ -1,0 +1,237 @@
+name: Linux packages
+
+# Every Linux package, for x86_64 and ARM64, each installed and tested on the
+# distros it's for. The release workflow calls this; pushes that touch
+# packaging run it on their own as a test (artifacts only, no release).
+#
+#   linux-x86_64 / linux-aarch64   AppImage, .deb, .rpm, .tar.gz, .snap
+#   flatpak-x86_64 / -aarch64       .flatpak bundle
+#   flatpak-sources                 cargo-sources.json for Flathub
+#   aur                             PKGBUILD + .SRCINFO (null-notes-bin)
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: true
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "packaging/**"
+      - ".github/workflows/linux-packages.yml"
+
+env:
+  REF: ${{ inputs.ref || github.sha }}
+
+jobs:
+  native:
+    name: AppImage, deb, rpm, tar.gz, snap (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-22.04 }
+          - { arch: aarch64, runner: ubuntu-22.04-arm }
+    runs-on: ${{ matrix.runner }}   # 22.04 = glibc 2.35, the oldest distro supported
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REF }}
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libssl-dev build-essential \
+            librsvg2-dev patchelf file rpm xvfb
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+      - name: Build AppImage, .rpm, .tar.gz, .deb
+        run: packaging/linux/build-linux.sh
+      - name: Build .snap
+        run: |
+          sudo snap install snapcraft --classic
+          cd packaging/snap
+          sudo snapcraft --destructive-mode --verbosity=brief
+          mv null-notes_*.snap ../linux/dist/
+      - name: Check the packages
+        run: |
+          cd packaging/linux/dist
+          ls -la
+          v=$(python3 -c "import json;print(json.load(open('../../../src-tauri/tauri.conf.json'))['version'])")
+          d=$([ "${{ matrix.arch }}" = x86_64 ] && echo amd64 || echo arm64)
+          for f in "Null-Notes-$v-${{ matrix.arch }}.AppImage" "null-notes-$v-1.${{ matrix.arch }}.rpm" \
+                   "null-notes-$v-linux-${{ matrix.arch }}.tar.gz" "null-notes_${v}_$d.deb" "null-notes_${v}_$d.snap"; do
+            test -s "$f" || { echo "::error::missing $f"; exit 1; }
+          done
+          rpm -qp --qf '%{ARCH}\n' "null-notes-$v-1.${{ matrix.arch }}.rpm" | grep -qx "${{ matrix.arch }}"
+          dpkg-deb -f "null-notes_${v}_$d.deb" Architecture | grep -qx "$d"
+          file -L "Null-Notes-$v-${{ matrix.arch }}.AppImage"
+      - name: Launch the AppImage
+        run: |
+          cd packaging/linux/dist
+          set +e
+          APPIMAGE_EXTRACT_AND_RUN=1 timeout 20 xvfb-run -a ./Null-Notes-*.AppImage
+          rc=$?
+          [ $rc = 124 ] || { echo "::error::AppImage exited with $rc (should still be running)"; exit 1; }
+      - name: Install and launch the snap
+        run: |
+          sudo snap install --dangerous packaging/linux/dist/null-notes_*.snap
+          snap connections null-notes
+          set +e
+          timeout 30 xvfb-run -a snap run null-notes
+          rc=$?
+          [ $rc = 124 ] || { echo "::error::snap exited with $rc (should still be running)"; exit 1; }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: packaging/linux/dist/*
+
+  distros:
+    name: Install on ${{ matrix.image }} (${{ matrix.arch }})
+    needs: native
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04, image: "ubuntu:22.04", kind: deb }
+          - { arch: x86_64, runner: ubuntu-24.04, image: "debian:12", kind: deb }
+          - { arch: x86_64, runner: ubuntu-24.04, image: "fedora:latest", kind: rpm }
+          - { arch: x86_64, runner: ubuntu-24.04, image: "opensuse/tumbleweed", kind: zypper }
+          - { arch: x86_64, runner: ubuntu-24.04, image: "rockylinux:9", kind: rpm }
+          - { arch: aarch64, runner: ubuntu-24.04-arm, image: "ubuntu:22.04", kind: deb }
+          - { arch: aarch64, runner: ubuntu-24.04-arm, image: "debian:12", kind: deb }
+          - { arch: aarch64, runner: ubuntu-24.04-arm, image: "fedora:latest", kind: rpm }
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist
+      - name: Install
+        run: |
+          case "${{ matrix.kind }}" in
+            deb) apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y ./dist/*.deb ;;
+            rpm) dnf install -y ./dist/*.rpm ;;
+            zypper) zypper --non-interactive install --allow-unsigned-rpm ./dist/*.rpm ;;
+          esac
+      - name: All libraries found
+        run: |
+          ldd /usr/bin/null-notes
+          ! ldd /usr/bin/null-notes | grep "not found"
+          test -f /usr/share/applications/*.desktop
+          grep -h "x-scheme-handler/nullnotes" /usr/share/applications/*.desktop
+      - name: tar.gz runs here too
+        run: |
+          mkdir t && tar -xzf dist/*.tar.gz -C t
+          ! ldd t/*/null-notes | grep "not found"
+
+  flatpak-sources:
+    name: Flatpak crate list
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REF }}
+      - run: packaging/flatpak/cargo-sources.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-sources
+          path: packaging/flatpak/cargo-sources.json
+
+  flatpak:
+    name: Flatpak (${{ matrix.arch }})
+    needs: flatpak-sources
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04 }
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REF }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: flatpak-sources
+          path: packaging/flatpak
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          manifest-path: packaging/flatpak/dev.nullgrid.notes.yml
+          bundle: null-notes-${{ matrix.arch }}.flatpak
+          arch: ${{ matrix.arch }}
+          cache-key: flatpak-builder-${{ matrix.arch }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          upload-artifact: false
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-${{ matrix.arch }}
+          path: null-notes-${{ matrix.arch }}.flatpak
+
+  flatpak-test:
+    name: Install and launch the Flatpak (${{ matrix.arch }})
+    needs: flatpak
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04 }
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: flatpak-${{ matrix.arch }}
+      - run: |
+          sudo apt-get update && sudo apt-get install -y flatpak xvfb
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y --noninteractive ./null-notes-${{ matrix.arch }}.flatpak
+          flatpak info --user dev.nullgrid.notes
+          set +e
+          timeout 30 xvfb-run -a flatpak run --user dev.nullgrid.notes
+          rc=$?
+          [ $rc = 124 ] || { echo "::error::Flatpak exited with $rc (should still be running)"; exit 1; }
+
+  aur:
+    name: AUR package (built and installed on Arch)
+    needs: native
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REF }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: linux-*
+          merge-multiple: true
+          path: dist
+      - name: Write PKGBUILD and .SRCINFO, build and install
+        run: |
+          pacman -Syu --noconfirm --needed base-devel python sudo
+          useradd -m builder
+          echo "builder ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/builder
+          chown -R builder .
+          sudo -u builder packaging/aur/make-aur.sh dist aur
+          cat aur/PKGBUILD aur/.SRCINFO
+          cp dist/null-notes-*-linux-x86_64.tar.gz aur/
+          cd aur
+          sudo -u builder makepkg -s --noconfirm
+          pacman -U --noconfirm null-notes-bin-*.pkg.tar.zst
+          ! ldd /usr/bin/null-notes | grep "not found"
+          pacman -Ql null-notes-bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aur
+          include-hidden-files: true
+          path: |
+            aur/PKGBUILD
+            aur/.SRCINFO

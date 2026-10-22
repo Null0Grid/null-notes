@@ -4,10 +4,13 @@
 #   packaging/linux/build-linux.sh [appimage] [rpm] [tar] [deb]     (default: all four)
 #
 # Output, in packaging/linux/dist/:
-#   Null-Notes-<v>-x86_64.AppImage        runs on any distro, nothing to install
-#   null-notes-<v>-1.x86_64.rpm           Fedora / openSUSE / RHEL-family
-#   null-notes-<v>-linux-x86_64.tar.gz    plain binary + install.sh (installs into ~/.local)
-#   null-notes_<v>_amd64.deb              Debian / Ubuntu (packaging/deb/build-deb.sh)
+#   Null-Notes-<v>-<arch>.AppImage        runs on any distro, nothing to install
+#   null-notes-<v>-1.<arch>.rpm           Fedora / openSUSE / RHEL-family
+#   null-notes-<v>-linux-<arch>.tar.gz    plain binary + install.sh (installs into ~/.local)
+#   null-notes_<v>_<debarch>.deb          Debian / Ubuntu (packaging/deb/build-deb.sh)
+#
+# <arch> is the machine's: x86_64 or aarch64 (deb: amd64 or arm64). Build on
+# an ARM64 machine for the ARM64 packages; there's no cross-compiling here.
 #
 # A Linux binary only runs where glibc is at least as new as on the machine
 # that built it. Build on the OLDEST distro you want to support: the release
@@ -23,9 +26,14 @@ tauri="$root/src-tauri"
 V="$(python3 -c "import json;print(json.load(open('$tauri/tauri.conf.json'))['version'])")"
 want="${*:-appimage rpm tar deb}"
 has() { [[ " $want " == *" $1 "* ]]; }
+case "$(uname -m)" in
+  x86_64) arch=x86_64 debarch=amd64 ;;
+  aarch64|arm64) arch=aarch64 debarch=arm64 ;;
+  *) echo "unsupported architecture $(uname -m)" >&2; exit 1 ;;
+esac
 dist="$here/dist"
 mkdir -p "$dist"
-echo "Null Notes $V: $want"
+echo "Null Notes $V ($arch): $want"
 
 # 1. AppImage and .rpm: Tauri's bundler (also builds the release binary)
 bundles=()
@@ -37,11 +45,11 @@ if [ ${#bundles[@]} -gt 0 ]; then
   ( cd "$tauri" && cargo tauri build --bundles "$(IFS=,; echo "${bundles[*]}")" )
   out="$tauri/target/release/bundle"
   if has appimage; then
-    cp "$(ls -t "$out"/appimage/*.AppImage | head -1)" "$dist/Null-Notes-$V-x86_64.AppImage"
-    chmod +x "$dist/Null-Notes-$V-x86_64.AppImage"
+    cp "$(ls -t "$out"/appimage/*.AppImage | head -1)" "$dist/Null-Notes-$V-$arch.AppImage"
+    chmod +x "$dist/Null-Notes-$V-$arch.AppImage"
   fi
   if has rpm; then
-    cp "$(ls -t "$out"/rpm/*.rpm | head -1)" "$dist/null-notes-$V-1.x86_64.rpm"
+    cp "$(ls -t "$out"/rpm/*.rpm | head -1)" "$dist/null-notes-$V-1.$arch.rpm"
   fi
 else
   ( cd "$tauri" && cargo build --release --features tauri/custom-protocol )
@@ -49,7 +57,7 @@ fi
 
 # 2. Plain .tar.gz: the binary, icons, a .desktop file and install/uninstall scripts
 if has tar; then
-  name="null-notes-$V-linux-x86_64"
+  name="null-notes-$V-linux-$arch"
   stage="$here/stage/$name"
   rm -rf "$here/stage"
   mkdir -p "$stage/icons"
@@ -61,7 +69,8 @@ if has tar; then
   cp "$here/null-notes.desktop" "$stage/null-notes.desktop"
   install -m755 "$here/install.sh" "$stage/install.sh"
   install -m755 "$here/uninstall.sh" "$stage/uninstall.sh"
-  sed "s/@VERSION@/$V/g" "$here/README-tarball.txt" > "$stage/README.txt"
+  sed "s/@VERSION@/$V/g; s/@ARCH@/$arch/g" "$here/README-tarball.txt" > "$stage/README.txt"
+  cp "$root/LICENSE" "$stage/LICENSE"
   tar -C "$here/stage" --owner=0 --group=0 -czf "$dist/$name.tar.gz" "$name"
   rm -rf "$here/stage"
 fi
@@ -69,7 +78,7 @@ fi
 # 3. .deb
 if has deb; then
   "$root/packaging/deb/build-deb.sh"
-  cp "$root/packaging/deb/null-notes_${V}_amd64.deb" "$dist/"
+  cp "$root/packaging/deb/null-notes_${V}_${debarch}.deb" "$dist/"
 fi
 
 glibc="$(objdump -T "$tauri/target/release/null-notes" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"

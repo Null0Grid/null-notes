@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dev.nullgrid.notes</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>LicenseRef-proprietary</project_license>
+  <name>Null Notes</name>
+  <summary>Your notes as plain files: linked, searchable, encrypted, synced</summary>
+  <developer id="dev.nullgrid">
+    <name>NULLGRID</name>
+  </developer>
+  <description>
+    <p>
+      Null Notes is a local-first Markdown notes app. A vault is just a folder on your
+      computer: no account, no cloud, and nothing leaves the machine unless you turn on sync.
+      It is part of Null Grid, alongside Null Search and Null Drive.
+    </p>
+    <ul>
+      <li>Markdown with a live preview: tasks, tables, code, images and Mermaid diagrams</li>
+      <li>Wiki links, tags, backlinks and an outline; links update when you rename a note</li>
+      <li>Canvases (whiteboards in the JSON Canvas format) and a graph view</li>
+      <li>Quick open, full-text search, daily notes and templates</li>
+      <li>Locked notes, encrypted with XChaCha20-Poly1305 and an Argon2id key</li>
+      <li>Backup or two-way sync with Null Drive, your own file server, including end-to-end encrypted accounts</li>
+      <li>Null Search integration and nullnotes:// links</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">dev.nullgrid.notes.desktop</launchable>
+  <provides>
+    <binary>null-notes</binary>
+  </provides>
+  <url type="homepage">https://nullgrid.dev</url>
+  <url type="bugtracker">https://github.com/Null0Grid/null-notes/issues</url>
+  <url type="vcs-browser">https://github.com/Null0Grid/null-notes</url>
+  <screenshots>
+    <screenshot type="default">
+      <caption>The editor, with live preview, backlinks and outline</caption>
+      <image>https://raw.githubusercontent.com/Null0Grid/null-notes/main/docs/screenshots/editor.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>A canvas</caption>
+      <image>https://raw.githubusercontent.com/Null0Grid/null-notes/main/docs/screenshots/canvas.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>The graph of how notes connect</caption>
+      <image>https://raw.githubusercontent.com/Null0Grid/null-notes/main/docs/screenshots/graph.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Sync with Null Drive</caption>
+      <image>https://raw.githubusercontent.com/Null0Grid/null-notes/main/docs/screenshots/null-drive-settings.png</image>
+    </screenshot>
+  </screenshots>
+  <categories>
+    <category>Office</category>
+    <category>TextTools</category>
+  </categories>
+  <keywords>
+    <keyword>notes</keyword>
+    <keyword>markdown</keyword>
+    <keyword>vault</keyword>
+    <keyword>wiki</keyword>
+  </keywords>
+  <recommends>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </recommends>
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+  <branding>
+    <color type="primary" scheme_preference="light">#9ff3ff</color>
+    <color type="primary" scheme_preference="dark">#0a0a0f</color>
+  </branding>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="5.1.0" date="2026-10-21">
+      <description>
+        <p>Linux packages for more distros: AppImage, .rpm, .tar.gz, Flatpak and Snap, on x86_64 and ARM64.</p>
+      </description>
+    </release>
+    <release version="5.0.0" date="2026-10-19">
+      <description>
+        <p>Backup and two-way sync into end-to-end encrypted Null Drive accounts.</p>
+      </description>
+    </release>
+    <release version="0.7.0" date="2026-10-18">
+      <description>
+        <p>Two-way sync with Null Drive.</p>
+      </description>
+    </release>
+  </releases>
+</component>

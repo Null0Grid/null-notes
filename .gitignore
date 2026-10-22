@@ -14,3 +14,11 @@ packaging/linux/dist/
 packaging/linux/stage/
 *.AppImage
 *.rpm
+packaging/flatpak/cargo-sources.json
+.flatpak-builder/
+packaging/flatpak/build-dir/
+packaging/aur/out/
+packaging/snap/*.snap
+packaging/snap/parts/
+packaging/snap/stage/
+packaging/snap/prime/

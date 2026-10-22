@@ -1,0 +1,56 @@
+# Flatpak manifest for Null Notes, built from source with no network access
+# (what Flathub requires). The Rust crates come from cargo-sources.json,
+# generated from src-tauri/Cargo.lock by packaging/flatpak/cargo-sources.sh.
+#
+# Local build (needs flatpak-builder and the Flathub remote):
+#   packaging/flatpak/cargo-sources.sh
+#   flatpak-builder --user --install --force-clean --install-deps-from=flathub \
+#     build-dir packaging/flatpak/dev.nullgrid.notes.yml
+#   flatpak run dev.nullgrid.notes
+#
+# The release workflow attaches a copy for Flathub, with the "dir" source
+# below swapped for the release's git tag and commit.
+id: dev.nullgrid.notes
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: null-notes
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # Null Drive sync, and the local search service Null Search talks to (127.0.0.1:47821)
+  - --share=network
+  # vaults are ordinary folders the user picks, anywhere in their home folder
+  - --filesystem=home
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/null-notes/cargo
+    CARGO_NET_OFFLINE: 'true'
+modules:
+  - name: null-notes
+    buildsystem: simple
+    build-commands:
+      - cargo --offline fetch --manifest-path src-tauri/Cargo.toml --verbose
+      - cargo --offline build --release --locked --features tauri/custom-protocol --manifest-path src-tauri/Cargo.toml
+      - install -Dm755 src-tauri/target/release/null-notes /app/bin/null-notes
+      - install -Dm644 packaging/flatpak/dev.nullgrid.notes.desktop /app/share/applications/dev.nullgrid.notes.desktop
+      - install -Dm644 packaging/linux/dev.nullgrid.notes.metainfo.xml /app/share/metainfo/dev.nullgrid.notes.metainfo.xml
+      - install -Dm644 src-tauri/icons/32x32.png /app/share/icons/hicolor/32x32/apps/dev.nullgrid.notes.png
+      - install -Dm644 src-tauri/icons/128x128.png /app/share/icons/hicolor/128x128/apps/dev.nullgrid.notes.png
+      - install -Dm644 src-tauri/icons/128x128@2x.png /app/share/icons/hicolor/256x256/apps/dev.nullgrid.notes.png
+      - install -Dm644 src-tauri/icons/icon.png /app/share/icons/hicolor/512x512/apps/dev.nullgrid.notes.png
+    sources:
+      # @SOURCE@ (the release workflow replaces this entry for Flathub)
+      - type: dir
+        path: ../..
+        skip:
+          - src-tauri/target
+          - .flatpak-builder
+          - packaging/linux/dist
+          - packaging/flatpak/build-dir
+      - cargo-sources.json

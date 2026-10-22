@@ -457,9 +457,15 @@ pub fn build(b: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
             }
             // Installers (NSIS/MSI) and the MSIX manifest register nullnotes://.
             // Dev builds and Linux register the running binary instead.
+            // Flatpak and Snap register it through their own desktop entry: the
+            // binary's path inside the sandbox means nothing to the host.
             #[cfg(any(target_os = "linux", all(debug_assertions, windows)))]
-            if let Err(e) = app.deep_link().register_all() {
-                eprintln!("couldn't register nullnotes:// for this build: {e}");
+            let sandboxed = std::env::var_os("FLATPAK_ID").is_some() || std::env::var_os("SNAP").is_some();
+            #[cfg(any(target_os = "linux", all(debug_assertions, windows)))]
+            if !sandboxed {
+                if let Err(e) = app.deep_link().register_all() {
+                    eprintln!("couldn't register nullnotes:// for this build: {e}");
+                }
             }
             let lh = h.clone();
             app.deep_link().on_open_url(move |ev| handle_links(&lh, ev.urls().iter().map(|u| u.to_string()).collect()));

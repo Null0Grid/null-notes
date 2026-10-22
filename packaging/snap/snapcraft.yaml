@@ -1,0 +1,73 @@
+# Snap for Null Notes, made from the .deb that packaging/linux/build-linux.sh
+# builds (Ubuntu 22.04, same as core22). Build it on the same architecture:
+#
+#   packaging/linux/build-linux.sh deb
+#   cd packaging/snap && snapcraft --destructive-mode      # on Ubuntu 22.04
+#
+# Output: null-notes_<version>_<amd64|arm64>.snap
+# Test it: sudo snap install --dangerous ./null-notes_*.snap
+name: null-notes
+title: Null Notes
+base: core22
+adopt-info: null-notes
+summary: Your notes as plain files. Linked, searchable, encrypted, synced.
+description: |
+  Null Notes is a local-first Markdown notes app. A vault is just a folder on
+  your computer: no account, no cloud, and nothing leaves the machine unless
+  you turn on sync. It is part of Null Grid, alongside Null Search and Null Drive.
+
+  - Markdown with a live preview: tasks, tables, code, images, Mermaid
+  - Wiki links, tags, backlinks, an outline, canvases and a graph view
+  - Quick open, full-text search, daily notes and templates
+  - Locked notes (XChaCha20-Poly1305, Argon2id)
+  - Backup or two-way sync with Null Drive, including end-to-end encrypted accounts
+  - Null Search integration and nullnotes:// links
+
+  Vaults can be anywhere in your home folder (not hidden folders), or on
+  removable drives after: snap connect null-notes:removable-media
+grade: stable
+confinement: strict
+license: Proprietary
+website: https://nullgrid.dev
+source-code: https://github.com/Null0Grid/null-notes
+issues: https://github.com/Null0Grid/null-notes/issues
+
+architectures:
+  - build-on: [amd64]
+    build-for: [amd64]
+  - build-on: [arm64]
+    build-for: [arm64]
+
+# WebKitGTK starts its helper processes from a fixed path
+layout:
+  /usr/lib/$SNAPCRAFT_ARCH_TRIPLET/webkit2gtk-4.1:
+    bind: $SNAP/usr/lib/$SNAPCRAFT_ARCH_TRIPLET/webkit2gtk-4.1
+
+apps:
+  null-notes:
+    command: usr/bin/null-notes
+    desktop: usr/share/applications/null-notes.desktop
+    common-id: dev.nullgrid.notes
+    extensions: [gnome]
+    plugs:
+      - home
+      - removable-media
+      - network
+      # the local search service Null Search talks to, on 127.0.0.1:47821
+      - network-bind
+
+parts:
+  null-notes:
+    plugin: nil
+    source: ../linux/dist
+    stage-packages:
+      - libwebkit2gtk-4.1-0
+    override-build: |
+      set -eu
+      deb="$(ls "$SNAPCRAFT_PART_SRC"/null-notes_*_"$(dpkg --print-architecture)".deb | head -1)"
+      dpkg -x "$deb" "$SNAPCRAFT_PART_INSTALL"
+      craftctl set version="$(basename "$deb" | cut -d_ -f2)"
+      desktop="$SNAPCRAFT_PART_INSTALL/usr/share/applications/null-notes.desktop"
+      sed -i 's|^Icon=.*|Icon=${SNAP}/usr/share/icons/hicolor/512x512/apps/null-notes.png|' "$desktop"
+      install -Dm644 "$SNAPCRAFT_PROJECT_DIR/../linux/dev.nullgrid.notes.metainfo.xml" \
+        "$SNAPCRAFT_PART_INSTALL/usr/share/metainfo/dev.nullgrid.notes.metainfo.xml"
