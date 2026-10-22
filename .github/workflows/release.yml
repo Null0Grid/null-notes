@@ -1,8 +1,10 @@
 name: Release
 
-# Push a tag that matches the app version (src-tauri/tauri.conf.json), with
-# or without a "v": v5.0.1 or 5.0.1. Or, for a tag that already exists:
-# Actions → Release → Run workflow, and type the tag.
+# Easiest: Actions → Release → Run workflow, and type the version (e.g. 5.1.1).
+# If that tag doesn't exist yet, it's created on the latest main, along with
+# the release. If it exists, that tag is built. Or push a tag yourself, with
+# or without a "v" (v5.1.1 or 5.1.1). Either way it must match the app version
+# in src-tauri/tauri.conf.json.
 # Builds every Linux package for x86_64 and ARM64 (linux-packages.yml), the Windows installers and the Microsoft Store package and
 # attaches them to the release for that tag (an existing release keeps its
 # published/draft state; a new one is published).
@@ -15,7 +17,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to build and attach to its release (e.g. 5.0.0)"
+        description: "Version to release, e.g. 5.1.1 (a new tag is made on main if it doesn't exist)"
         required: true
 
 env:
@@ -30,12 +32,21 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.v.outputs.version }}
+      ref: ${{ steps.v.outputs.ref }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.TAG }}
+          fetch-depth: 0
       - id: v
         run: |
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            ref=$(git rev-parse "refs/tags/$TAG^{commit}")
+          else
+            ref=$(git rev-parse HEAD)
+            echo "::notice::tag $TAG doesn't exist yet; the release will create it on $(git log -1 --format='%h %s' HEAD)"
+          fi
+          git checkout -q "$ref"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
           app=$(python3 -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
           tag="${TAG#v}"
           if [ "$app" != "$tag" ]; then echo "::error::tag $TAG but tauri.conf.json says $app"; exit 1; fi
@@ -46,7 +57,7 @@ jobs:
     needs: version
     uses: ./.github/workflows/linux-packages.yml
     with:
-      ref: ${{ inputs.tag || github.ref_name }}
+      ref: ${{ needs.version.outputs.ref }}
 
   windows:
     name: Windows installers + Store package
@@ -55,7 +66,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ needs.version.outputs.ref }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -89,7 +100,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ needs.version.outputs.ref }}
       - uses: actions/download-artifact@v4
         with:
           path: art
@@ -121,6 +132,7 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG }}
+          target_commitish: ${{ needs.version.outputs.ref }}
           append_body: true
           name: Null Notes ${{ needs.version.outputs.version }}
           files: out/*
