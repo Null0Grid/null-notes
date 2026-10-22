@@ -398,7 +398,9 @@ textarea::selection{background:rgba(0,229,255,.25)}
 /* Null Notes mark: two stacked sheets with the Null // */
 .mark{width:1.5em;height:1.5em;overflow:visible;flex:none;vertical-align:middle}
 .mk-sq{fill:none;stroke:var(--cyan);stroke-width:5;filter:drop-shadow(0 0 2px rgba(0,229,255,.6))}
-.mk-sq.mk-front{fill:var(--bg)}
+.mk-sq.mk-front{fill:var(--bg);stroke-linejoin:round}
+.mk-sq.mk-fold{fill:none;stroke-linejoin:round}
+.mk-ln{stroke:var(--cyan);stroke-opacity:.4;stroke-width:2.8;stroke-linecap:round}
 .mk-sl{fill:#00e8ff;filter:drop-shadow(0 0 2px rgba(255,46,136,.85)) drop-shadow(0 0 5px rgba(255,46,136,.4))}
 .logo .mark{width:24px;height:24px}
 .wlogo{display:flex;align-items:center;gap:14px}
